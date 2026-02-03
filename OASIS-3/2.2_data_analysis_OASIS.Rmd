@@ -1,0 +1,1191 @@
+---
+title: "2.2_data_analysis_OASIS"
+output: html_document
+date: "2025-09-05"
+---
+```{r, include  = FALSE}
+library(tidyverse) #dplyr, ...
+library(car)       #linear hypothesis test
+library(lmerTest)
+library(lavaan)
+library(cocor)     #Steiger's test
+library(semptools) #SEM significance plotting 
+library(gridExtra)
+library(kableExtra)
+library(corrplot)
+library(semPlot)
+library(tidySEM)
+library(gridGraphics)
+library(lsr)
+library(effectsize)
+library(gt)
+```
+
+### Custom functions for plotting
+```{r, include = TRUE}
+plotcross <- function(data, x_var, y_var, x_label, y_label, ymin, ymax, color_choice) {
+  ggplot(data, aes(x = .data[[x_var]], y = .data[[y_var]])) +
+    geom_point(size = 1.5, stroke = 1, alpha = 1, color = color_choice) +
+    geom_smooth(method = "lm", se = FALSE, color = "black", linewidth = 1, lty = 1) +
+    # geom_smooth(method = "lm", formula = y ~ poly(x, 2), se = FALSE, color = "black", linewidth = 1, lty = 1) +
+    labs(x = x_label, y = y_label) +
+    ylim(ymin, ymax) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(hjust = 0.5),
+      axis.title.x = element_text(size = 24),
+      axis.title.y = element_text(size = 24), 
+      axis.text.x = element_text(size = 10),  
+      axis.text.y = element_text(size = 10)  
+    )
+}
+
+plotit <- function(data, x_var, y_var, x_label, y_label, ymin, ymax, color_choice) {
+  ggplot(data, aes(x = .data[[x_var]], y = .data[[y_var]])) +
+    geom_point(size = 1.5, stroke = 1, alpha = 0.3, color = color_choice) +
+    geom_line(aes(group = id), lty = 2, alpha = 0.1, color = "black") +
+    geom_smooth(method = "lm", se = FALSE, color = color_choice, size = 0.5, lty = 1, aes(group = id)) +
+    labs(x = x_label, y = y_label) +
+    ylim(ymin, ymax) +
+    theme_minimal() + 
+    theme(
+      plot.title = element_text(hjust = 0.5),
+      axis.title.x = element_text(size = 16),
+      axis.title.y = element_text(size = 16), 
+      axis.text.x = element_text(size = 10),  
+      axis.text.y = element_text(size = 10)  
+    )
+}
+plotit2 <- function(data, x_var, y_var, x_label, y_label, ymin, ymax, color_choice, n_highlight = 100, seed = 716) {
+  set.seed(seed)
+  highlight_ids <- sample(unique(data$id), n_highlight)
+  data$highlight <- data$id %in% highlight_ids
+  ggplot(data, aes(x = .data[[x_var]], y = .data[[y_var]])) +
+    geom_line(data = subset(data, !highlight), aes(group = id), alpha = 0.3, linewidth = 0.3, color = color_choice) +
+    geom_line(data = subset(data, highlight), aes(group = id), alpha = 1, linewidth = 0.5, color = color_choice) +
+    labs(x = x_label, y = y_label) +
+    coord_cartesian(ylim = c(ymin, ymax)) +
+    scale_y_continuous(labels = scales::label_number()) +
+    theme_minimal() +
+    theme(
+      axis.title.x = element_text(size = 24),
+      axis.title.y = element_text(size = 24),
+      axis.text = element_text(size = 16)
+    )
+}
+plot_outliers <- function(data, x_var, y_var, x_label, y_label, ymin, ymax, outliers, color_choice) {
+  outlier_CCIDs <- unique(outliers$id)
+  data <- data %>%
+    mutate(is_outlier = ifelse(id %in% outlier_CCIDs, TRUE, FALSE))
+  non_outlier_data <- data %>%
+    filter(!is_outlier)
+  ggplot(data, aes(x = .data[[x_var]], y = .data[[y_var]])) +
+    geom_point(aes(color = is_outlier, alpha = is_outlier), size = 2, stroke = 1) +
+    geom_line(aes(group = id), lty = 2, alpha = 1, color = "black") +
+    geom_smooth(
+      data = non_outlier_data,
+      aes(x = .data[[x_var]], y = .data[[y_var]]),
+      method = "lm", se = FALSE, size = 0.8, lty = 1, color = "black"
+    ) +
+    labs(x = x_label, y = y_label) +
+    ylim(ymin, ymax) +
+    scale_color_manual(
+      values = c("TRUE" = "green", "FALSE" = color_choice),
+      labels = c("TRUE" = "Outlier", "FALSE" = "Non-Outlier")
+    ) +
+    scale_alpha_manual(values = c("TRUE" = 1, "FALSE" = 1), guide = "none") +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(hjust = 0.5),
+      legend.position = "bottom",
+      legend.box = "horizontal",
+      legend.text = element_text(size = 12), 
+      axis.title.x = element_text(size = 16),
+      axis.title.y = element_text(size = 16),
+      axis.text.x = element_text(size = 10),
+      axis.text.y = element_text(size = 10)
+    ) +
+    guides(color = guide_legend(title = NULL))
+}
+```
+
+### Custom function for Mahalanobis distance 
+```{r, include = TRUE}
+label_mahalanobis_outliers <- function(data, id_col, variables, flag_col_name = "outlier_flag") {
+  data_matrix <- data[, variables]
+  dists <- mahalanobis(
+    data_matrix,
+    colMeans(data_matrix, na.rm = TRUE),
+    cov(data_matrix, use = "complete.obs")
+  )
+  is_outlier <- dists > qchisq(0.975, df = length(variables))
+  outlier_ids <- data[[id_col]][is_outlier]
+  data[[flag_col_name]] <- ifelse(data[[id_col]] %in% outlier_ids, "Outlier", "Normal")
+  return(data)
+}
+```
+### Custom function for SEM table  
+```{r}
+sem_table <- function(fit_object, caption = "SEM Parameter Estimates") {
+  params <- parameterEstimates(fit_object, standardized = TRUE) %>%
+    filter(op %in% c("~", ":=")) %>%
+    select(lhs, op, rhs, std.lv, se, z, pvalue)
+  colnames(params) <- c("Outcome", "Op", "Predictor", "Std_Estimate", "SE", "Z", "p")
+  params <- params %>%
+    mutate(
+      Std_Estimate = round(Std_Estimate, 2),
+      SE = round(SE, 2),
+      Z = round(Z, 2),
+      p = round(p, 3),
+      p_formatted = ifelse(p < 0.001, "<.001", sub("^0", "", formatC(p, format = "f", digits = 3)))
+    )
+  params <- params %>%
+    mutate(
+      Std_Estimate = ifelse(p < 0.05,
+                            cell_spec(Std_Estimate, "html", bold = TRUE),
+                            as.character(Std_Estimate)),
+      p_formatted = ifelse(p < 0.05,
+                           cell_spec(p_formatted, "html", bold = TRUE),
+                           p_formatted)
+    )
+  params %>%
+    select(Outcome, Op, Predictor, Std_Estimate, SE, Z, p_formatted) %>%
+    rename(`p-value` = p_formatted) %>%
+    kable("html", escape = FALSE, caption = caption) %>%
+    kable_styling(full_width = FALSE, position = "center")
+}
+```
+
+#### Read in data 
+```{r}
+mydata_cross  <- read.csv("data_preprocessed/OASIS_cross_sectional_gCog_GM_5Sep25.csv")
+mydata_slopes <- read.csv("data_preprocessed/OASIS_longitudinal_gCog_GM_5Sep25.csv")
+mydata_BCSM   <- read.csv("data_preprocessed/OASIS_corresponding_lags.csv")
+gm_long       <- read.csv("data_preprocessed/OASIS_longitudinal_GM_5Sep25.csv")
+```
+
+### CROSS-SECTIONAL ANALYSIS 
+#Descriptive statistic of the sample 
+```{r}
+length(unique(mydata_cross$id))
+length(unique(mydata_slopes$id))
+
+cat("Cross-sectional age summary (A0_raw):\n")
+print(summary(mydata_cross$Age))
+cat("Cross-sectional sex:\n")
+print(table(factor(mydata_cross$Sex, levels = c(1, 2), labels = c("Female", "Male"))))
+
+cat("Longitudinal baseline age summary (A0_raw):\n")
+print(summary(mydata_slopes$A0))
+
+cat("dA:\n")
+print(summary(gm_long$dx))
+```
+
+## Mediation models
+### Outliers
+```{r}
+mydata_cross$gCog <- mydata_cross$gCog0
+vars_to_scale <- c("Age", "Sex", "YoE", "Thickness", "Area", "gCog")
+mydata_cross[vars_to_scale] <- scale(mydata_cross[vars_to_scale])
+mydata_cross <- label_mahalanobis_outliers(
+  data = mydata_cross,
+  id_col = "id",
+  variables = c("gCog0", "Thickness", "Area", "Age", "Sex", "YoE"),
+  flag_col_name = "outlier_flag"
+)
+all_outliers_cross <- data.frame(id = mydata_cross$id[mydata_cross$outlier_flag == "Outlier"])
+
+mydata_cross[mydata_cross$id %in% all_outliers_cross$id, setdiff(names(mydata_cross), "id")] <- NA
+mydata_cross <- mydata_cross[!is.na(mydata_cross$gCog), ]
+```
+#### Correlation matrix (final dataset)
+```{r}
+corr_vars <- mydata_cross[, c("Age", "gCog", "Thickness", "Area", "Sex")]
+colnames(corr_vars) <- c("Age","COG (g)", "THK", "SA", "Sex")
+matrix    <- cor(corr_vars)
+testRes   <- cor.mtest(corr_vars, conf.level = 0.95)
+png("Figures/cormatOASIS_withoutYoE.png", width = 6, height = 6, units = "in", res = 600)
+corrplot(matrix, method = 'number', p.mat = testRes$p, sig.level = 0.05, 
+                      order = 'original', type = "lower", diag = FALSE, tl.col = "black")
+dev.off()
+
+corr_vars <- mydata_cross[, c("Age", "gCog", "Thickness", "Area", "Sex", "YoE")]
+colnames(corr_vars) <- c("Age","COG (g)", "THK", "SA", "Sex", "YoE")
+matrix    <- cor(corr_vars)
+testRes   <- cor.mtest(corr_vars, conf.level = 0.95)
+png("Figures/cormatOASIS_withYoE.png", width = 6, height = 6, units = "in", res = 600)
+corrplot(matrix, method = 'number', p.mat = testRes$p, sig.level = 0.05, 
+                      order = 'original', type = "lower", diag = FALSE, tl.col = "black")
+dev.off()
+```
+### SEM1 (without YoE)
+```{r}
+SEM1 <- '
+  gCog  ~ c1*Age + b1*Thickness + b2*Area + c2*Sex
+  
+  Thickness  ~ a1*Age 
+  Area       ~ a2*Age 
+  Area       ~ Sex
+  
+  Thickness ~~ Area
+
+  ATC := abs(a1 * b1)  
+  ASC := abs(a2 * b2)  
+  ABC := ATC + ASC     
+  
+  Age_total := ABC + abs(c1)
+  
+  ATC_prop := ATC / Age_total
+  ASC_prop := ASC / Age_total
+'
+SEM_fit1 <- sem(SEM1, data = mydata_cross)
+summary(SEM_fit1, fit.measures=TRUE, std = TRUE)
+sem_table(SEM_fit1)
+
+# custom_layout <- matrix(c(
+#    0,   2,   
+#   -1,   1,    
+#    1,   1, 
+#   -1,   0 ,
+#    1.7, 1
+# ), ncol = 2, byrow = TRUE) # [1] "gCog0" "Thickness" "Area"  "Age"  "Sex" 
+# semPaths(SEM_fit1,what = "std", layout = custom_layout, edge.label.cex = 1.3, label.cex = 1,
+#                       sizeMan = 10, residuals = FALSE, intercepts = FALSE, nCharNodes = 0, title = FALSE,
+#                       mar = c(4, 4, 4, 4))
+
+SEM1_equated_age <- '
+  gCog ~ c1*Age + b1*Thickness + b1*Area + c2*Sex 
+
+  Thickness ~ a1*Age 
+  Area      ~ a1*Age 
+  Area      ~ Sex
+  
+  Thickness ~~ Area 
+  
+  ATC := a1 * b1
+  ASC := a1 * b1
+  ABC := abs(ATC) + abs(ASC)
+'
+SEM_fit1_age_equated    <- sem(SEM1_equated_age, data = mydata_cross)
+anova(SEM_fit1, SEM_fit1_age_equated)
+```
+### SEM2 (with YoE)
+```{r}
+SEM2 <- '
+  gCog  ~ c1*Age + b1*Thickness + b2*Area + c2*Sex + c3*YoE
+  
+  Thickness  ~ a1*Age 
+  Area       ~ a2*Age 
+  
+  Area       ~ Sex
+  YoE        ~ Area
+  
+  Thickness ~~ Area
+
+  ATC := abs(a1 * b1)  
+  ASC := abs(a2 * b2)  
+  ABC := ATC + ASC     
+  
+  Age_total := ABC + abs(c1)
+  
+  ATC_prop := ATC / Age_total
+  ASC_prop := ASC / Age_total
+
+'
+SEM_fit2 <- sem(SEM2, data = mydata_cross)
+summary(SEM_fit2, fit.measures=TRUE, std = TRUE)
+sem_table(SEM_fit2)
+
+# custom_layout2 <- matrix(c(
+#    0,    2,   
+#   -1,    1,    
+#    1,    1, 
+#    1.7,  2,
+#   -1,    0,  
+#    1.7,  1
+# ), ncol = 2, byrow = TRUE) 
+# semPaths(SEM_fit2,what = "std", layout = custom_layout2, edge.label.cex = 1.3, label.cex = 1,
+#                       sizeMan = 10, residuals = FALSE, intercepts = FALSE, nCharNodes = 0, title = FALSE,
+#                       mar = c(4, 4, 4, 4))
+
+SEM2_equated_age <- '
+  gCog ~ c1*Age + b1*Thickness + b1*Area + c2*Sex + c3*YoE
+
+  Thickness ~ a1*Age 
+  Area      ~ a1*Age 
+  
+  Area      ~ Sex
+  YoE       ~ Area
+  
+  Thickness ~~ Area 
+  
+  ATC := a1 * b1
+  ASC := a1 * b1
+  ABC := abs(ATC) + abs(ASC)
+'
+SEM_fit2_age_equated    <- sem(SEM2_equated_age, data = mydata_cross)
+anova(SEM_fit2, SEM_fit2_age_equated)
+```
+
+### LONGITUDINAL ANALYSIS 
+#### Outliers 
+```{r}
+plotcross(mydata_slopes, "Thickness_A0_slope", "gCog_slope_A0", "GM Thickness Change Rate", "Cognition Change Rate", min(mydata_slopes$gCog_slope_A0), max(mydata_slopes$gCog_slope_A0), color_choice = "darkorange")
+
+plotcross(mydata_slopes, "Area_A0_slope", "gCog_slope_A0", "GM Area Change Rate", "Cognition Change Rate", min(mydata_slopes$gCog_slope_A0), max(mydata_slopes$gCog_slope_A0),  color_choice = "turquoise4")
+
+mydata_slopes$A0_raw  <- mydata_slopes$A0
+mydata_slopes$A0      <- scale(mydata_slopes$A0_raw)
+mydata_slopes$YoE_raw <- mydata_slopes$YoE
+
+vars_to_scale <- c("Sex", "YoE", "A0", "Thickness_A0_slope", "Area_A0_slope", "gCog_slope_A0")
+mydata_slopes[c("Sex", "YoE", "A0", "Thickness_A0_slope", "Area_A0_slope", "gCog_slope_A0")] <- scale(mydata_slopes[vars_to_scale])
+
+mydata_slopes <- label_mahalanobis_outliers(data = mydata_slopes, id_col = "id",
+                 variables = c("Area_A0_slope", "Thickness_A0_slope", "gCog_slope_A0", "Sex", "YoE", "A0"),
+                 flag_col_name = "outlier_flag")
+
+all_outliers <- data.frame(id = mydata_slopes$id[mydata_slopes$outlier_flag == "Outlier"])
+
+outlier_thickness_plot <- plot_outliers(mydata_slopes, "Thickness_A0_slope", "gCog_slope_A0", 
+                                        "Thickness Change Rate", "'g' Change Rate", 
+                                         min(mydata_slopes$gCog_slope_A0), 
+                                         max(mydata_slopes$gCog_slope_A0), 
+                                         all_outliers, "darkorange")
+
+outlier_area_plot      <- plot_outliers(mydata_slopes, "Area_A0_slope", "gCog_slope_A0", 
+                                        "Surface Area Change Rate", "'g' Change Rate", 
+                                        min(mydata_slopes$gCog_slope_A0), 
+                                        max(mydata_slopes$gCog_slope_A0), 
+                                        all_outliers, "turquoise4")
+
+grid.arrange(outlier_thickness_plot, outlier_area_plot, ncol = 2)
+mydata_slopes[mydata_slopes$id %in% all_outliers$id, setdiff(names(mydata_slopes), "id")] <- NA
+OASIS_slopes <- mydata_slopes[!is.na(mydata_slopes$gCog_slope_A0), ]
+```
+## Univariate analysis of change in MR measures 
+```{r}
+# gm_long$Thickness <- scale(gm_long$Thickness)
+# gm_long$Area      <- scale(gm_long$Area)
+
+gm_long[gm_long$id %in% all_outliers$id, setdiff(names(gm_long), "id")] <- NA
+gm_long <- gm_long[!is.na(gm_long$MR_age), ]
+
+thickness_change_plot <- plotit2(gm_long, "MR_age", "Thickness", 
+                                "Age", "THK", 
+                                min(gm_long$Thickness) , max(gm_long$Thickness), "darkorange")
+
+area_change_plot      <- plotit2(gm_long, "MR_age", "Area", 
+                                "Age", "SA", 
+                                 (min(gm_long$Area)), (max(gm_long$Area)), "turquoise4")
+
+png("Figures/THK_SA_age_OASIS.png", width = 16, height = 8, units = "in", res = 300)
+grid.arrange(thickness_change_plot, area_change_plot, ncol = 2)
+dev.off()
+
+gm_plot <- gm_long %>%
+  select(id, MR_age, Thickness, Area) %>%
+  pivot_longer(cols = c(Thickness, Area),names_to = "measure", values_to = "value")
+
+gm_plot <- gm_plot %>%
+  group_by(measure) %>%
+  mutate(value_z = as.numeric(scale(value))) %>% ungroup()
+
+ggplot(gm_plot, aes(MR_age, value_z, color = measure)) +
+  geom_line(aes(group = interaction(id, measure)), alpha = 0.1, linewidth = 0.3) +
+  geom_smooth(method = "gam", formula = y ~ s(x, k = 5), se = TRUE, linewidth = 1.4) +
+  scale_color_manual(values = c("Thickness" = "darkorange","Area" = "turquoise4")) +
+  # coord_cartesian(ylim = c(-6, 2.5), xlim = c(18, 100)) +   # ← SET MIN / MAX HERE
+  labs(x = "Age", y = "z-score", title = NULL, color = NULL) +
+  theme_minimal() + 
+  theme(legend.position = "none", 
+        axis.title.x = element_text(size = 24), 
+        axis.title.y = element_text(size = 24),
+        axis.text.x = element_text(size = 16),
+        axis.text.y = element_text(size = 16))
+ggsave(filename = "Figures/GAMM_age_OASIS.png", width = 8, height = 8, units = "in", bg = "white", dpi = 300)
+```
+###Univariate mixed-effects models
+```{r}
+Interaction <- (gm_long$dA - mean(gm_long$dA)) * (gm_long$A0 - mean(gm_long$A0))
+OrthInteraction <- residuals(lmer(Interaction ~ dA + A0 + (1|id), data = gm_long))
+
+thickness_m <- lmer(Thickness ~ A0 + dA + OrthInteraction + (1|id), data=gm_long)
+area_m      <- lmer(Area      ~ A0 + dA + OrthInteraction + (1|id), data=gm_long)
+
+standardize_parameters(thickness_m)
+standardize_parameters(area_m)
+
+extract_lmer_summary <- function(model, model_name) {
+  sm  <- summary(model)$coefficients
+  std <- standardize_parameters(model)
+  eta <- eta_squared(model, partial = TRUE)
+
+  as.data.frame(sm) %>%
+    rownames_to_column("Predictor") %>%
+    filter(Predictor %in% c("A0", "dA", "OrthInteraction")) %>%
+    left_join(
+      std %>%
+        filter(Parameter %in% c("A0", "dA", "OrthInteraction")) %>%
+        select(Parameter, Std_Coefficient),
+      by = c("Predictor" = "Parameter")
+    ) %>%
+    left_join(
+      eta %>%
+        filter(Parameter %in% c("A0", "dA", "OrthInteraction")) %>%
+        select(Parameter, Eta2_partial),
+      by = c("Predictor" = "Parameter")
+    ) %>%
+    transmute(
+      Model = model_name,
+      Predictor,
+      beta      = round(Estimate, 4),
+      beta_std  = round(Std_Coefficient, 3),
+      eta2_p    = round(Eta2_partial, 3),
+      p         = sub("^0\\.", ".", sprintf("%.3f", `Pr(>|t|)`))
+    )
+}
+final_table <- bind_rows(
+  extract_lmer_summary(thickness_m, "Thickness"),
+  extract_lmer_summary(area_m,      "Area")
+)
+final_table %>%
+  gt() %>%
+  tab_header(
+    title = "Trajectories age-related",
+    subtitle = "Thickness, Area"
+  ) %>%
+  fmt_markdown(everything()) %>%
+  opt_table_outline() %>%
+  opt_all_caps()
+```
+## "Change - Change" analysis
+```{r}
+num_cols <- sapply(OASIS_slopes, is.numeric) & !grepl("_raw$|^id$|^Sex$", names(OASIS_slopes))
+OASIS_slopes[num_cols] <- lapply(OASIS_slopes[num_cols], scale)
+
+
+outlier_rm_thickness_plot <- plotcross(OASIS_slopes, "Thickness_A0_slope", "gCog_slope_A0", 
+                                       "THK change rate", "COG (g) change rate", 
+                                       min(OASIS_slopes$gCog_slope_A0), 
+                                       max(OASIS_slopes$gCog_slope_A0), 
+                                       "darkorange")
+
+outlier_rm_area_plot      <- plotcross(OASIS_slopes, "Area_A0_slope", "gCog_slope_A0", 
+                                       "SA change rate", "COG (g) change rate", 
+                                       min(OASIS_slopes$gCog_slope_A0), 
+                                       max(OASIS_slopes$gCog_slope_A0), 
+                                       "turquoise4")
+
+png("Figures/change_change_OASIS.png", width = 16, height = 8, units = "in", res = 600)
+grid.arrange(outlier_rm_thickness_plot, outlier_rm_area_plot, ncol = 2)
+dev.off()
+```
+## Change-Change models 
+```{r}
+adjustments <- c("A0", "A0dA", "gamm", "ranef")
+slope_cols <- grepl("slope", names(OASIS_slopes))
+
+OASIS_slopes[slope_cols] <- scale(OASIS_slopes[slope_cols])
+
+model_grid <- expand.grid(adj = adjustments, 
+                          measure = c("Thickness", "Area"),
+                          stringsAsFactors = FALSE)
+
+models_simple <- lapply(seq_len(nrow(model_grid)), function(i) {
+  adj <- model_grid$adj[i]
+  m   <- model_grid$measure[i]
+  yvar <- paste0("gCog_slope_", adj)
+  xvar <- paste0(m, "_", adj, "_slope")
+  fml <- as.formula(paste(yvar, "~", xvar))
+  lm(fml, data = OASIS_slopes)
+})
+names(models_simple) <- paste0("m_", model_grid$measure, "_", model_grid$adj)
+
+results_simple <- do.call(
+  rbind,
+  lapply(names(models_simple), function(nm) {
+
+    m  <- models_simple[[nm]]
+    sm <- summary(m)$coefficients
+
+    eta2 <- summary(m)$r.squared  # correct for simple lm
+
+    data.frame(
+      model     = nm,
+      predictor = rownames(sm),
+      beta      = sm[, "Estimate"],
+      p         = sm[, "Pr(>|t|)"],
+      eta2      = c(NA, eta2),  # intercept gets NA
+      row.names = NULL
+    )
+  })
+) %>%
+  dplyr::filter(predictor != "(Intercept)")
+
+
+final_table <- results_simple %>%
+  mutate(
+    Adjustment = case_when(
+      grepl("_A0$", model)   ~ "A0",
+      grepl("_A0dA$", model) ~ "A0dA",
+      grepl("_gamm$", model) ~ "GAMM", 
+      grepl("_ranef$", model) ~ "ranef"
+    ),
+    Measure = case_when(
+      grepl("^m_Thickness", model) ~ "Thickness",
+      grepl("^m_Area", model)      ~ "Area"
+    ),
+    stat = sprintf("%.2f, η² = %.2f, p = %.3f", beta, eta2, p),
+    stat = sub("p = 0\\.", "p = .", stat)
+  ) %>%
+  select(Adjustment, Measure, stat) %>%
+  pivot_wider(names_from = Measure, values_from = stat) %>%
+  arrange(factor(Adjustment, levels = c("A0", "A0dA", "GAMM", "ranef")))
+
+steiger_table <- tibble(
+  Adjustment = c("A0", "A0dA", "GAMM", "ranef"),
+  adj_suffix = c("A0", "A0dA", "gamm", "ranef")
+) %>%
+  rowwise() %>% mutate(
+    steiger = list({
+      y  <- OASIS_slopes[[paste0("gCog_slope_", adj_suffix)]]
+      x1 <- OASIS_slopes[[paste0("Thickness_", adj_suffix, "_slope")]]
+      x2 <- OASIS_slopes[[paste0("Area_", adj_suffix, "_slope")]]
+      ok <- complete.cases(y, x1, x2)
+      ct <- cocor.dep.groups.overlap(
+        r.jk = cor(y[ok], x1[ok]),
+        r.jh = cor(y[ok], x2[ok]),
+        r.kh = cor(x1[ok], x2[ok]),
+        n    = sum(ok), alternative = "two.sided")
+      tibble(
+        z_steiger = sprintf("%.2f", ct@steiger1980$statistic),
+        p_steiger = sub("^0\\.", ".", sprintf("%.3f", ct@steiger1980$p.value)),
+        n = sum(ok))
+    })
+  ) %>% unnest(steiger) %>% select(-adj_suffix)
+final_table_all <- final_table %>% left_join(steiger_table, by = "Adjustment")
+final_table_all %>%
+  gt() %>%
+  tab_header(
+    title = "Model Results",
+    subtitle = "Thickness, Area, and Steiger Comparisons"
+  ) %>%
+  fmt_markdown(everything()) %>%
+  opt_table_outline() %>%
+  opt_all_caps()
+```
+## Diagnostic 
+```{r}
+diag_df <- OASIS_slopes %>%
+  select(
+    id,
+    gCog_A0    = gCog_slope_A0,
+    gCog_ranef = gCog_slope_ranef,
+    Thk_A0     = Thickness_A0_slope,
+    Thk_ranef  = Thickness_ranef_slope,
+    Area_A0    = Area_A0_slope,
+    Area_ranef = Area_ranef_slope,
+    Sex,
+    A0
+  ) %>%
+  left_join(
+    gm_long %>%
+      group_by(id) %>%
+      summarise(
+        n_visits = n(),
+        dA_range = diff(range(dx, na.rm = TRUE)),
+        .groups = "drop"
+      ),
+    by = "id"
+  ) %>%
+  mutate(
+    abs_diff_gCog = abs(gCog_ranef - gCog_A0),
+    abs_diff_Thk  = abs(Thk_ranef  - Thk_A0),
+    abs_diff_Area = abs(Area_ranef - Area_A0)
+  )
+
+summary(lm(abs_diff_gCog ~ n_visits + dA_range + Sex + A0, data = diag_df))
+summary(lm(abs_diff_Thk ~ n_visits + dA_range  + Sex + A0, data = diag_df))
+summary(lm(abs_diff_Area ~ n_visits + dA_range + Sex + A0, data = diag_df))
+```
+## ROI models 
+```{r}
+roi_cols <- grep("^(?!Thickness|Area|CorticalWhiteMatter).*_A0_slope$",
+                 names(OASIS_slopes), value = TRUE, perl = TRUE)
+roi_meta <- data.frame(col = roi_cols, region = sub("^(.*)_A0_slope$", "\\1", roi_cols),
+                       measure = "thickness", stringsAsFactors = FALSE)
+
+roi_long <- do.call(rbind, lapply(seq_len(nrow(roi_meta)), function(i) {
+  cl <- roi_meta$col[i]
+  df <- data.frame(
+    ROI     = OASIS_slopes[[cl]],
+    gCog    = OASIS_slopes$gCog_slope_A0
+  )
+  df <- df[complete.cases(df), ]
+  sm <- summary(lm(gCog ~ ROI, data = df))$coefficients["ROI", ]
+  data.frame(
+    region  = roi_meta$region[i],
+    measure = roi_meta$measure[i],
+    beta    = round(sm["Estimate"], 2),
+    p       = sm["Pr(>|t|)"],   
+    n       = nrow(df),
+    stringsAsFactors = FALSE
+  )
+}))
+
+roi_long$p_fdr <- ave(roi_long$p, roi_long$measure, FUN = function(x) p.adjust(x, method = "fdr"))
+roi_table <- reshape(roi_long, idvar = "region",timevar = "measure", direction = "wide")
+p_cols <- grep("^p(\\.|_fdr\\.)", names(roi_table), value = TRUE)
+roi_table[p_cols] <- lapply(roi_table[p_cols],function(x) sub("^0\\.", ".", sprintf("%.3f", x)))
+roi_table %>%
+  gt() %>%
+  tab_header(
+    title = "ROI Model Results",
+    subtitle = "Thickness by ROI"
+  ) %>%
+  fmt_markdown(everything()) %>%
+  opt_table_outline() %>%
+  opt_all_caps()
+
+roi_long$sig <- roi_long$p_fdr < 0.05
+roi_long$region <- factor(
+  roi_long$region,
+  levels = rev(unique(roi_long$region))
+)
+ggplot(roi_long, aes(x = beta, y = region, color = measure, shape = sig)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey50") +
+  geom_point(position = position_dodge(width = 0.3), size = 2) +
+  scale_shape_manual(values = c(`FALSE` = 1, `TRUE` = 16)) +
+  scale_color_manual(values = c(thickness = "darkorange", area = "turquoise3")) +
+  scale_x_continuous(limits = c(-0.30, 0.30)) +
+  labs(title = "OASIS-3", x = NULL, y = NULL) +
+  theme_bw() +
+  theme(panel.grid.major.y = element_blank(), legend.position = "none", plot.title = element_text(hjust = 0.5))
+ggsave("Figures/roi_effects_long_OASIS.png", width = 3, height = 9, dpi = 300)
+```
+## Full models with baselines 
+```{r}
+OASIS_slopes$Thickness_baseline <- scale(OASIS_slopes$Thickness_baseline)
+OASIS_slopes$Area_baseline <- scale(OASIS_slopes$Area_baseline)
+
+models_sb <- lapply(adjustments, function(adj) {
+  yvar <- paste0("gCog_slope_", adj)
+  x_th <- paste0("Thickness_", adj, "_slope")
+  x_ar <- paste0("Area_", adj, "_slope")
+  b_th <- paste0("Thickness_baseline")
+  b_ar <- paste0("Area_baseline")
+  fml <- as.formula(
+    paste(yvar, "~", x_th, "+", x_ar, "+", b_th, "+", b_ar)
+  )
+  lm(fml, data = OASIS_slopes)
+})
+names(models_sb) <- paste0("m2_", adjustments)
+
+results <- do.call(
+  rbind,
+  lapply(names(models_sb), function(nm) {
+    m  <- models_sb[[nm]]
+    sm <- summary(m)$coefficients
+    eta <- eta_squared(m, partial = TRUE)
+    as.data.frame(sm) %>%
+      tibble::rownames_to_column("predictor") %>%
+      left_join(
+        eta %>%
+          select(Parameter, Eta2_partial),
+        by = c("predictor" = "Parameter")
+      ) %>%
+      transmute(
+        model     = nm,
+        predictor = predictor,
+        beta      = Estimate,
+        p         = `Pr(>|t|)`,
+        eta2      = Eta2_partial
+      )
+  })
+)
+
+results <- results %>% filter(grepl("Thickness_.*_slope|Area_.*_slope|Thickness_baseline|Area_baseline", predictor))
+
+wide_models <- results %>%
+  mutate(
+    Adjustment = case_when(
+      grepl("^m2_A0$", model)   ~ "A0",
+      grepl("^m2_A0dA$", model) ~ "A0dA",
+      grepl("^m2_gamm$", model) ~ "GAMM", 
+      grepl("^m2_ranef$", model) ~ "ranef", 
+    ),
+    Predictor_clean = case_when(
+      grepl("Thickness_.*_slope", predictor) ~ "Thickness_slope",
+      grepl("Area_.*_slope", predictor)      ~ "Area_slope",
+      grepl("Thickness_baseline", predictor) ~ "Thickness_baseline",
+      grepl("Area_baseline", predictor)      ~ "Area_baseline"
+    ),
+    beta_r = round(beta, 2),
+    eta_r  = round(eta2, 2),
+    p_r    = round(p, 3),
+    stat   = paste0(beta_r, ", η² = ", eta_r, ", p = ", sub("^0\\.", ".", p_r))
+  ) %>%
+  select(Adjustment, Predictor_clean, stat) %>%
+  pivot_wider(
+    names_from  = Predictor_clean,
+    values_from = stat
+  ) %>%
+  arrange(factor(Adjustment, levels = c("A0", "A0dA", "GAMM", "ranef"))) %>%
+  select(
+    Adjustment,
+    Thickness_slope,
+    Area_slope,
+    Thickness_baseline,
+    Area_baseline
+  )
+
+extract_lh <- function(mod, hyp) {
+  ct <- as.data.frame(linearHypothesis(mod, hyp))
+  row <- ct[2, , drop = FALSE]
+  
+  stat_col <- intersect(c("Chisq", "F"), names(row))[1]
+  p_col    <- intersect(c("Pr(>Chisq)", "Pr(>F)"), names(row))[1]
+  
+  stat_val <- suppressWarnings(as.numeric(row[[stat_col]]))
+  p_val    <- suppressWarnings(as.numeric(row[[p_col]]))
+  tibble(stat_type = stat_col, stat = round(stat_val, 2), p_lh = sub("^0\\.", ".", sprintf("%.3f", p_val)))
+}
+
+lh_table <- tibble(
+  Adjustment = c("A0", "A0dA", "GAMM", "ranef"),
+  model_name = c("m2_A0", "m2_A0dA", "m2_gamm", "m2_ranef"),
+  contrast   = c(
+    "Thickness_A0_slope - Area_A0_slope = 0",
+    "Thickness_A0dA_slope - Area_A0dA_slope = 0",
+    "Thickness_gamm_slope - Area_gamm_slope = 0", 
+    "Thickness_ranef_slope - Area_ranef_slope = 0"
+  )
+) %>%
+  mutate(out = pmap(list(model_name, contrast), \(mn, h) extract_lh(models_sb[[mn]], h))) %>%
+  tidyr::unnest(out) %>%
+  select(-model_name, -contrast)
+
+final_models_table <- wide_models %>% left_join(lh_table, by = "Adjustment")
+final_models_table %>%
+  gt() %>%
+  tab_header(
+    title = "Slope + Baseline Results",
+    subtitle = "Thickness, Area"
+  ) %>%
+  fmt_markdown(everything()) %>%
+  opt_table_outline() %>%
+  opt_all_caps()
+```
+
+## Longitudinal SEM 
+```{r}
+mydata_BCSM$id <- mydata_BCSM$id_fs
+
+mydata <- mydata_BCSM[mydata_BCSM$id %in% OASIS_slopes$id, ]
+mydata <- as.data.frame(mydata)
+split_data <- split(mydata, mydata$id_cg)
+
+get_baseline_followups <- function(df) {
+  
+  baseline_dx <- min(df$dx_unscaled, na.rm = TRUE)
+  baseline_row <- df[df$dx_unscaled == baseline_dx, , drop = FALSE][1, ]
+  baseline_row$A0 <- baseline_row$A0
+  
+  # Define time windows for 3-year and 6-year follow-ups
+  min_3yr <- baseline_dx + 2.5
+  max_3yr <- baseline_dx + 3.5
+  min_6yr <- baseline_dx + 5.5
+  max_6yr <- baseline_dx + 6.5
+  
+  # Find follow-up rows
+  followups_3yr <- df[df$dx_unscaled > min_3yr & df$dx_unscaled < max_3yr, , drop = FALSE]
+  followups_6yr <- df[df$dx_unscaled > min_6yr & df$dx_unscaled < max_6yr, , drop = FALSE]
+  
+  # Select the closest to exactly 3 and 6 years, if multiple exist
+  if (nrow(followups_3yr) > 0) {
+    followups_3yr$abs_diff <- abs((followups_3yr$dx_unscaled - baseline_dx) - 3)
+    best_3yr <- followups_3yr[which.min(followups_3yr$abs_diff), , drop = FALSE]
+    best_3yr$abs_diff <- NULL
+  } else {
+    best_3yr <- NULL
+  }
+  
+  if (nrow(followups_6yr) > 0) {
+    followups_6yr$abs_diff <- abs((followups_6yr$dx_unscaled - baseline_dx) - 6)
+    best_6yr <- followups_6yr[which.min(followups_6yr$abs_diff), , drop = FALSE]
+    best_6yr$abs_diff <- NULL
+  } else {
+    best_6yr <- NULL
+  }
+  
+  # Combine available timepoints
+  combined <- rbind(baseline_row, best_3yr, best_6yr)
+  return(combined)
+}
+
+# Apply function to all subjects
+results_list <- lapply(split_data, get_baseline_followups)
+
+# Align columns across all subjects
+all_cols <- unique(unlist(lapply(results_list, names)))
+results_list_aligned <- lapply(results_list, function(df) {
+  df <- as.data.frame(df)
+  missing_cols <- setdiff(all_cols, names(df))
+  for (col in missing_cols) df[[col]] <- NA
+  df <- df[, all_cols]
+  return(df)
+})
+
+result_df <- do.call(rbind, results_list_aligned)
+
+valid_ids <- result_df %>%
+  group_by(id_cg) %>%
+  summarise(
+    has_baseline = any(dx_unscaled == min(dx_unscaled, na.rm = TRUE)),
+    has_6yr = any(dx_unscaled - min(dx_unscaled, na.rm = TRUE) > 5.5 &
+                  dx_unscaled - min(dx_unscaled, na.rm = TRUE) < 6.5)
+  ) %>%
+  filter(has_baseline & has_6yr) %>%
+  pull(id_cg)
+
+result_df_complete <- result_df[result_df$id_cg %in% valid_ids, ]
+```
+
+```{r}
+mydata_BCSM <- result_df_complete
+# Assign visit occasion based on time difference from baseline
+mydata_BCSM <- do.call(rbind, lapply(split(mydata_BCSM, mydata_BCSM$id_cg), function(df) {
+  baseline_dx <- min(df$dx_unscaled, na.rm = TRUE)
+  
+  df$occasion <- NA
+  df$occasion[which.min(df$dx_unscaled)] <- 0  # baseline
+  
+  # assign 3-year and 6-year occasions based on proximity
+  df$occasion[abs((df$dx_unscaled - baseline_dx) - 3) < 0.5] <- 1  # 3-year
+  df$occasion[abs((df$dx_unscaled - baseline_dx) - 6) < 0.5] <- 2  # 6-year
+  
+  return(df)
+}))
+
+baseline <- mydata_BCSM[mydata_BCSM$occasion == 0, 
+                        c("id_cg", "Thickness", "gCog0", "Area",
+                          "ANIMALS", "VEG", "digsym", "tma", "tmb", "PSY021", "A0")]
+colnames(baseline) <- c("id", "Thickness0", "gCog0", "Area0",
+                        "ANIMALS0", "VEG0", "digsym0", "tma0", "tmb0", "PSY0210", "A0")
+
+followup3 <- mydata_BCSM[mydata_BCSM$occasion == 1, 
+                         c("id_cg", "Thickness", "gCog0", "Area",
+                           "ANIMALS", "VEG", "digsym", "tma", "tmb", "PSY021")]
+colnames(followup3) <- c("id", "Thickness1", "gCog1", "Area1",
+                         "ANIMALS1", "VEG1", "digsym1", "tma1", "tmb1", "PSY0211")
+
+followup6 <- mydata_BCSM[mydata_BCSM$occasion == 2, 
+                         c("id_cg", "Thickness", "gCog0", "Area",
+                           "ANIMALS", "VEG", "digsym", "tma", "tmb", "PSY021")]
+colnames(followup6) <- c("id", "Thickness2", "gCog2", "Area2",
+                         "ANIMALS2", "VEG2", "digsym2", "tma2", "tmb2", "PSY0212")
+
+BCSM_data <- Reduce(function(x, y) merge(x, y, by = "id", all = TRUE),
+                    list(baseline, followup3, followup6))
+
+cols_to_scale <- setdiff(names(BCSM_data), "id")
+BCSM_data[cols_to_scale] <- scale(BCSM_data[cols_to_scale])
+
+# write.csv(BCSM_data, "data_preprocessed/OASIS_BLCSM_data_forLGM_5Sep25.csv", row.names = FALSE)
+```
+
+```{r}
+BLCS_thickness <-'
+
+Thickness2 ~ 1*Thickness0
+dThickness =~ 1*Thickness2
+Thickness2 ~ 0*1
+Thickness2 ~~ 0*Thickness2
+
+gCog2 ~ 1*gCog0
+dgCog =~ 1*gCog2
+dgCog ~ 1
+gCog0 ~  1
+gCog2 ~ 0*1
+
+dgCog ~~  dgCog
+gCog0 ~~   gCog0
+gCog2 ~~ 0*gCog2
+
+dThickness ~ 1
+Thickness0 ~ 1
+dThickness ~~ dThickness
+Thickness0 ~~ Thickness0
+
+dThickness~gCog0+Thickness0
+dgCog~Thickness0+gCog0
+
+gCog0 ~~  Thickness0
+dgCog ~~ dThickness
+
+# dThickness ~ A0 
+# dgCog      ~ A0 
+
+'
+fitBLCS_thickness <- lavaan(BLCS_thickness, data=BCSM_data, estimator='mlr',fixed.x=TRUE,missing='fiml')
+summary(fitBLCS_thickness, fit.measures=TRUE, standardized=TRUE, rsquare=TRUE)
+
+custom_layout <- matrix(c(
+  1, 0,
+  1, 6,
+  0, 0,
+  0, 6,
+  1, 2,
+  1, 4
+), ncol = 2, byrow = TRUE)
+
+thickness_plot <- semPlot::semPaths(fitBLCS_thickness, 
+                  whatLabels = "std",  
+                  layout = "tree", 
+                  rotation = 2, 
+                  edge.label.cex = 1.5, 
+                  label.cex = 1.2, 
+                  sizeMan = 9, 
+                  sizeLat = 9,
+                  nCharNodes = 3,
+                  intercepts = FALSE,
+                  residuals = FALSE, 
+                  edge.color = "black")
+
+thickness_plot <- mark_sig(thickness_plot, fitBLCS_thickness)
+plot(thickness_plot)
+
+BLCS_thickness_age <-'
+
+Thickness2 ~ 1*Thickness0
+dThickness =~ 1*Thickness2
+Thickness2 ~ 0*1
+Thickness2 ~~ 0*Thickness2
+
+gCog2 ~ 1*gCog0
+dgCog =~ 1*gCog2
+dgCog ~ 1
+gCog0 ~  1
+gCog2 ~ 0*1
+
+dgCog ~~  dgCog
+gCog0 ~~   gCog0
+gCog2 ~~ 0*gCog2
+
+dThickness ~ 1
+Thickness0 ~ 1
+dThickness ~~ dThickness
+Thickness0 ~~ Thickness0
+
+dThickness~gCog0+Thickness0
+dgCog~Thickness0+gCog0
+
+gCog0 ~~  Thickness0
+dgCog ~~ dThickness
+
+dThickness ~ A0
+dgCog      ~ A0
+
+'
+fitBLCS_thickness_age <- lavaan(BLCS_thickness_age, data=BCSM_data, estimator='mlr',fixed.x=TRUE,missing='fiml')
+summary(fitBLCS_thickness_age, fit.measures=TRUE, standardized=TRUE, rsquare=TRUE)
+```
+
+```{r}
+lgm_model <- '
+
+  i_gCog =~ 1*gCog0 + 1*gCog1 + 1*gCog2        
+  s_gCog =~ 0*gCog0 + 1*gCog1 + 2*gCog2        
+  
+  i_Thick =~ 1*Thickness0 + 1*Thickness1 + 1*Thickness2
+  s_Thick =~ 0*Thickness0 + 1*Thickness1 + 2*Thickness2
+
+  i_gCog ~ 1
+  s_gCog ~ 1
+  
+  i_Thick ~ 1
+  s_Thick ~ 1
+  
+  i_gCog ~~ i_Thick
+  s_gCog ~~ s_Thick
+  s_Thick ~ i_gCog 
+  s_gCog ~ i_Thick
+
+  gCog0 ~~ 0.01*gCog0
+  gCog1 ~~ 0.01*gCog1
+  gCog2 ~~ 0.01*gCog2
+  
+  Thickness0 ~~ 0.01*Thickness0
+  Thickness1 ~~ 0.01*Thickness1
+  Thickness2 ~~ 0.01*Thickness2
+'
+
+fit_lgm <- growth(lgm_model, data = BCSM_data, missing = "fiml")
+summary(fit_lgm, fit.measures = TRUE, standardized = TRUE, rsquare = TRUE)
+
+# missing_props <- colMeans(is.na(BCSM_data[, c("Thickness0", "Thickness1", "Thickness2")]))
+# missing_props
+
+param_est <- parameterEstimates(fit_lgm, standardized=TRUE)
+param_edges <- param_est[param_est$op %in% c("=~", "~", "~~"), ]
+
+param_edges$pvalue[is.na(param_edges$pvalue)] <- 1
+edge_colors <- ifelse(param_edges$pvalue < 0.05, "black", "lightgrey")
+edge_labels <- round(param_edges$std.all, 2)
+semPaths(fit_lgm,
+         whatLabels = "none",  
+         edgeLabels = as.character(edge_labels),  
+         edge.color = edge_colors,
+         layout = "tree",
+         rotation = 1,
+         edge.label.cex = 0.8,
+         edge.label.position = 0.6,
+         sizeMan = 6,
+         sizeLat = 7,
+         esize = 1,
+         curve = 1,
+         intercepts = FALSE,
+         residuals = TRUE)
+
+```
+
+```{r}
+BLCS_area <-'
+
+Area2 ~ 1*Area0
+dArea =~ 1*Area2
+Area2 ~ 0*1
+Area2 ~~ 0*Area2
+
+gCog2 ~ 1*gCog0
+dgCog =~ 1*gCog2
+dgCog ~ 1
+gCog0 ~  1
+gCog2 ~ 0*1
+
+dgCog ~~  dgCog
+gCog0 ~~   gCog0
+gCog2 ~~ 0*gCog2
+
+dArea ~ 1
+Area0 ~ 1
+dArea ~~ dArea
+Area0 ~~ Area0
+
+dArea~gCog0+Area0
+dgCog~Area0+gCog0
+
+gCog0 ~~  Area0
+dgCog ~~ dArea
+
+'
+fitBLCS_area <- lavaan(BLCS_area, data=BCSM_data, estimator='mlr',fixed.x=TRUE,missing='fiml')
+summary(fitBLCS_area, fit.measures=TRUE, standardized=TRUE, rsquare=TRUE)
+
+area_plot <- semPlot::semPaths(fitBLCS_area, 
+                  whatLabels = "std",  
+                  layout = "tree", 
+                  rotation = 2, 
+                  edge.label.cex = 1.5, 
+                  label.cex = 1.2, 
+                  sizeMan = 9, 
+                  sizeLat = 9,
+                  nCharNodes = 3,
+                  intercepts = FALSE,
+                  residuals = FALSE, 
+                  edge.color = "black")
+
+area_plot <- mark_sig(area_plot, fitBLCS_area)
+plot(area_plot)
+
+BLCS_area_age <-'
+
+Area2 ~ 1*Area0
+dArea =~ 1*Area2
+Area2 ~ 0*1
+Area2 ~~ 0*Area2
+
+gCog2 ~ 1*gCog0
+dgCog =~ 1*gCog2
+dgCog ~ 1
+gCog0 ~  1
+gCog2 ~ 0*1
+
+dgCog ~~  dgCog
+gCog0 ~~   gCog0
+gCog2 ~~ 0*gCog2
+
+dArea ~ 1
+Area0 ~ 1
+dArea ~~ dArea
+Area0 ~~ Area0
+
+dArea~gCog0+Area0
+dgCog~Area0+gCog0
+
+gCog0 ~~  Area0
+dgCog ~~ dArea
+
+dArea ~ A0 
+dgCog ~ A0 
+
+'
+fitBLCS_area <- lavaan(BLCS_area_age, data=BCSM_data, estimator='mlr',fixed.x=TRUE,missing='fiml')
+summary(fitBLCS_area, fit.measures=TRUE, standardized=TRUE, rsquare=TRUE)
+```
+
+```{r}
+lgm_area_model <- '
+
+  i_gCog =~ 1*gCog0 + 1*gCog1 + 1*gCog2        
+  s_gCog =~ 0*gCog0 + 1*gCog1 + 2*gCog2        
+  
+  i_Area =~ 1*Area0 + 1*Area1 + 1*Area2
+  s_Area =~ 0*Area0 + 1*Area1 + 2*Area2
+  
+  i_gCog ~ 1
+  s_gCog ~ 1
+  i_Area ~ 1
+  s_Area ~ 1
+
+  i_gCog ~~ i_Area
+  s_gCog ~~ s_Area
+
+  s_Area ~ i_gCog 
+  s_gCog ~ i_Area
+
+  gCog0 ~~ 0.01*gCog0
+  gCog1 ~~ 0.01*gCog1
+  gCog2 ~~ 0.01*gCog2
+  
+  Area0 ~~ 0.01*Area0
+  Area1 ~~ 0.01*Area1
+  Area2 ~~ 0.01*Area2
+'
+fit_lgm_area <- growth(lgm_area_model, data = BCSM_data, missing = "fiml")
+summary(fit_lgm_area, fit.measures = TRUE, standardized = TRUE, rsquare = TRUE)
+
+param_est_area <- parameterEstimates(fit_lgm_area, standardized = TRUE)
+param_edges_area <- param_est_area[param_est_area$op %in% c("=~", "~", "~~"), ]
+param_edges_area$pvalue[is.na(param_edges_area$pvalue)] <- 1
+
+edge_colors_area <- ifelse(param_edges_area$pvalue < 0.05, "black", "lightgrey")
+edge_labels_area <- round(param_edges_area$std.all, 2)
+
+semPaths(fit_lgm_area,
+         whatLabels = "none",
+         edgeLabels = as.character(edge_labels_area),
+         edge.color = edge_colors_area,
+         layout = "tree",
+         rotation = 1,
+         edge.label.cex = 0.8,
+         edge.label.position = 0.6,
+         sizeMan = 6,
+         sizeLat = 7,
+         esize = 1,
+         curve = 1,
+         intercepts = FALSE,
+         residuals = TRUE)
+```

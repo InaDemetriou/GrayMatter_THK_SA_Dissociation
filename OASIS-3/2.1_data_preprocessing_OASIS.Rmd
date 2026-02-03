@@ -1,0 +1,713 @@
+---
+title: "2.1_data_preprocessing_OASIS"
+output: html_document
+date: "2025-11-23"
+---
+
+```{r}
+library(tidyverse)
+library(lmerTest)
+library(psych)
+library(data.table)
+library(miceadds)
+library(patchwork)
+library(gamm4)
+```
+
+# Longitudinal data preparation 
+```{r}
+freesurf <- read.csv("data_raw/OASIS3_Freesurfer_output.csv")
+cog      <- read.csv("data_raw/OASIS3_UDSc1_cognitive_assessments.csv")
+sex      <- read.csv("data_raw/OASIS_Sex_DOB.csv")
+edu      <- read.csv("data_raw/OASIS_Edu_Others.csv")
+
+vol_cols <- grep("_volume$", names(freesurf), value = TRUE)
+thickness_cols <- grep("_thickness$", names(freesurf), value = TRUE)
+
+freesurf$id <- freesurf$Subject
+cog$id      <- cog$OASISID
+sex$id      <- sex$Subject
+
+cog <- merge(cog, edu[, c("OASISID", "EDUC")], by = "OASISID", all.x = TRUE)
+cog <- merge(cog, sex[, c("id", "M.F")], by = "id", all.x = TRUE)
+
+names(cog)[names(cog) == "EDUC"] <- "YoE"
+names(cog)[names(cog) == "M.F"]  <- "Sex"
+
+cog$Sex      <- ifelse(cog$Sex == "M", 1, ifelse(cog$Sex == "F", 2, NA))
+cog$sex_code <- cog$Sex
+
+freesurf$lag <- as.numeric(sub(".*OAS\\d+_MR_d(\\d+)", "\\1", freesurf$MR_session))
+cog$lag      <- as.numeric(sub(".*OAS\\d+_psychometrics_d(\\d+)", "\\1", cog$OASIS_session_label))
+```
+
+### Initial assessment
+```{r}
+length(unique(freesurf$id))
+length(unique(cog$id))
+```
+
+```{r}
+freesurf$dx   <- NA  
+freesurf$wave <- NA
+
+cog$A0   <- NA  
+cog$dx   <- NA  
+cog$wave <- NA
+
+freesurf$lag_years <- round(freesurf$lag/365, 2)
+cog$lag_years      <- round(cog$lag/365, 2)
+
+for (i in unique(freesurf$Subject)) {
+  rows <- which(freesurf$Subject == i)
+  lags <- freesurf$lag[rows]
+  if (all(is.na(lags))) next
+  freesurf$dx[rows]   <- round((lags - min(lags, na.rm = TRUE))/365, 2)
+  freesurf$wave[rows] <- order(order(freesurf$dx[rows]))-1
+}
+
+#Same for cognition 
+for (i in unique(cog$OASISID)) {
+  rows <- which(cog$OASISID == i)
+  lags <- cog$lag[rows]
+  if (all(is.na(lags))) next
+  cog$dx[rows] <- round((lags - min(lags, na.rm = TRUE))/365, 2)
+  cog$A0[rows] <- round(min(cog$age.at.visit[rows]) - min(cog$lag_years[rows]), 2) 
+  #additonal step: calculate absolute A0 at the study start
+  cog$wave[rows] <- order(order(cog$dx[rows]))-1
+}
+
+#Calculate actual age at MR scans and actual age at Cog assess 
+cog$cog_age          <- as.numeric(cog$age.at.visit) #actual cog assess age 
+cog$dx_unscaled      <- cog$dx 
+freesurf$dx_unscaled <- freesurf$dx 
+
+freesurf$A0     <- cog$A0[match(freesurf$Subject, cog$OASISID)]
+freesurf$MR_age <- freesurf$A0 + freesurf$lag_years 
+#actual MRI scan age (absolute A0 + lag_years per each scan)
+
+#Pull out age at baseline for cog and age at baseline for MR (Not the same as A0!)
+cog <- cog %>%
+  group_by(id) %>%
+  mutate(cog_age0 = first(cog_age[dx == 0])) %>%
+  ungroup()
+
+freesurf <- freesurf %>%
+  group_by(id) %>%
+  mutate(MR_age0 = first(MR_age[dx == 0])) %>%
+  ungroup()
+
+# Calculate how many waves each ID has  
+# cog$n_waves      <- as.numeric(ave(cog$id, cog$id, FUN = length))
+# freesurf$n_waves <- as.numeric(ave(freesurf$id, freesurf$id, FUN = length))
+
+length(unique(freesurf$id[freesurf$dx > 6]))
+length(unique(cog$id[cog$dx > 6]))
+
+length(unique(freesurf$id[freesurf$dx > 2]))
+length(unique(cog$id[cog$dx > 2]))
+```
+*A0* - absolute age in the beginning of the study (does not correspond to any assessment and should not be used in modelling)
+*lag_years* - actual years since the absolute beginning of the study (do not use for any modelling)
+*MR_age0* - individual age at baseline for MR scan (repeated for waves in each ID, use to model cross-sectional effects of age in brain trajectories)
+*cog_age0* - individual age at baseline for cog assess (repeated in each ID, use to model cross-sectional effects of age in cognitive trajectories)
+*dx* - standardised lags between assessments (set to 0 for the first assessment) (use to model change effects)
+*n_waves* - how many waves each ID has (do not use for modelling, descriptive statistic)
+
+```{r}
+plot_df <- bind_rows(
+  freesurf %>% mutate(modality = "MRI"),
+  cog %>% mutate(modality = "COG")
+) %>%
+  filter(!is.na(lag_years), !is.na(dx))
+
+plot_study_timeline <- ggplot(plot_df, aes(lag_years, dx)) +
+  geom_hex(aes(fill = modality), alpha = 0.9) +
+  geom_segment(
+    data = data.frame(x = 0, y = 0, xend = 35, yend = 35),
+    aes(x = x, y = y, xend = xend, yend = yend),
+    inherit.aes = FALSE,
+    linetype = "dashed", color = "grey40", linewidth = 0.4,
+    arrow = arrow(length = unit(0.3, "cm"), type = "closed")
+  ) +
+  geom_segment(
+    data = data.frame(intercept = c(-5, -10, -15, -20)),
+    aes(x = -intercept, y = 0, xend = 35, yend = 35 + intercept),
+    inherit.aes = FALSE,
+    linetype = "dotted", color = "grey70", linewidth = 0.4,
+    arrow = arrow(length = unit(0.25, "cm"), type = "open")
+  ) +
+  facet_wrap(~ modality) +
+  scale_fill_manual(values = c("COG" = "#D8B4FE", "MRI" = "lightblue1")) +
+  labs(
+    x = "Time of recruitment since the study start (years)",
+    y = "Time between assessments (years)",
+    fill = NULL
+  ) +
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),
+    strip.text = element_text(face = "bold")
+  )
+
+ggsave("Figures/study_timeline_OASIS.png", plot = plot_study_timeline, width = 8, height = 4, dpi = 300, bg = "white")
+```
+
+```{r}
+make_raster_clean <- function(df, id_col, session_col, dx_col, title, fill_col) {
+  dfv <- df %>%
+    filter(!is.na(.data[[dx_col]])) %>%
+    distinct(.data[[id_col]], .data[[session_col]], .data[[dx_col]]) %>%
+    rename(id = all_of(id_col), dx = all_of(dx_col))
+  id_order <- dfv %>%
+    group_by(id) %>%
+    summarise(max_dx = max(dx), .groups = "drop") %>%
+    arrange(desc(max_dx)) %>%
+    mutate(id_ord = row_number())
+  grid_df <- expand_grid(
+    id = id_order$id,
+    dx_bin = 0:30
+  ) %>%
+    left_join(id_order, by = "id") %>%
+    left_join(dfv %>% mutate(dx_bin = floor(dx)), by = c("id", "dx_bin")) %>%
+    mutate(present = !is.na(dx))
+  ggplot(grid_df, aes(dx_bin, id_ord)) +
+    geom_tile(aes(fill = present), height = 0.9, width = 0.9) +
+    scale_fill_manual(values = c("TRUE" = fill_col, "FALSE" = "white")) +
+    scale_x_continuous(limits = c(0, 30), expand = c(0, 0)) +
+    scale_y_reverse(expand = c(0, 0)) +
+    labs(
+      title = title,
+      x = "Time since indvidual baseline (years)",
+      y = "Participants"
+    ) +
+    theme_minimal(base_size = 12) +
+    theme(
+      panel.grid = element_blank(),
+      axis.text.y = element_blank(),
+      axis.ticks.y = element_blank(),
+      legend.position = "none",
+      plot.title = element_text(face = "bold", hjust = 0.5),
+      axis.title.x = element_text(margin = margin(t = 8)),
+      axis.title.y = element_text(margin = margin(r = 8))
+    )
+}
+
+p_cog <- make_raster_clean(cog, id_col = "id",session_col = "OASIS_session_label", dx_col = "dx", title = "COG", fill_col = "#D8B4FE")
+p_mri <- make_raster_clean(freesurf,id_col = "id",session_col = "MR_session",dx_col = "dx",title = "MRI",fill_col = "lightblue1")
+
+ggsave("Figures/Dropout_wave_pattern_cog.png", p_cog, width = 4, height = 4, dpi = 600, bg = "white")
+ggsave("Figures/Dropout_wave_pattern_mri.png", p_mri, width = 4, height = 4, dpi = 600, bg = "white")
+
+png("Figures/Dropout_wave_pattern.png", width = 8, height = 4, units = "in", res = 600)
+grid.arrange(p_cog, p_mri, ncol = 2)
+dev.off()
+```
+
+## Cognitive variables 
+```{r}
+cog_vars <- c("ANIMALS", "VEG", "SIM", "PSY021", 
+              "digsym",  "digback", "tma", "tmb", 
+              "lettnum", "slosson", "switch", "block")
+sapply(cog[cog_vars], function(x) round(100 - mean(!is.na(x)) * 100, 1)) #check missing data % 
+
+# ANIMALS   VEG    SIM    PSY021  digsym  digback  tma    tmb    lettnum  slosson  switch   block 
+#    98.1   77.9   28.0   76.9    78.4    60.3     91.1   89.1   67.4     1.2      62.3     11.8 
+
+# VARS to keep (less 30% missing): ANIMALS, VEG, PSY021, digsym, tma, tmb 
+```
+
+## PCA  
+```{r}
+
+cog$tmb[cog$tmb >= 180] <- NA
+cog$tma[cog$tma >= 150] <- NA
+
+# plot(density(cog$tmb, na.rm = TRUE))
+# plot(density(cog$tma, na.rm = TRUE))
+# plot(density(cog$digsym, na.rm = TRUE))
+# plot(density(cog$PSY021, na.rm = TRUE))
+
+cog$PSY021  <- scale((as.numeric(cog$PSY021)))
+cog$ANIMALS <- scale(as.numeric(cog$ANIMALS))
+cog$VEG     <- scale(as.numeric(cog$VEG))
+cog$digsym  <- scale((as.numeric(cog$digsym)))
+cog$digback <- scale((as.numeric(cog$digback)))
+cog$lettnum <- scale((as.numeric(cog$lettnum)))
+cog$switch  <- scale((as.numeric(cog$switch)))
+cog$tma     <- (-1)*scale(log(as.numeric(cog$tma)))
+cog$tmb     <- (-1)*scale(log(as.numeric(cog$tmb)))
+
+# plot(density(cog$tmb, na.rm = TRUE))
+# plot(density(cog$tma, na.rm = TRUE))
+# plot(density(cog$digsym, na.rm = TRUE))
+# plot(density(cog$PSY021, na.rm = TRUE))
+
+cog      <- cog %>% arrange(OASISID, dx)
+cog$prac <- 1
+cog$prac[!duplicated(cog$OASISID)] <- 0
+cog$prac <- as.factor(cog$prac)
+
+```
+
+```{r}
+
+# pca_vars <- c("ANIMALS", "VEG", "digsym", "tma", "tmb", "PSY021")
+# cog[pca_vars] <- lapply(cog[pca_vars], function(x) as.numeric(as.vector(x)))
+# 
+# vars_for_mice <- c("id", "dx", "Sex", "YoE", "prac", pca_vars)
+# data_mice <- cog[, vars_for_mice]
+# data_mice$id <- as.integer(as.factor(data_mice$id))
+# 
+# ini  <- mice(data_mice, maxit = 0)
+# pred <- ini$predictorMatrix
+# meth <- ini$method
+# 
+# pca_rows <- match(pca_vars, colnames(pred))
+# id_col   <- match("id", colnames(pred))
+# dx_col   <- match("dx", colnames(pred))
+# sex_col  <- match("sex", colnames(pred))
+# yoe_col  <- match("YoE", colnames(pred))
+# prac_col  <- match("prac", colnames(pred))
+# 
+# pred[pca_rows, id_col]  <- -2   # cluster variable
+# pred[pca_rows, dx_col]  <-  1   # include dx as predictor
+# pred[pca_rows, sex_col] <-  1   # include sex as predictor
+# pred[pca_rows, yoe_col] <-  1   # include YoE as predictor
+# pred[pca_rows, prac_col] <-  1   # include YoE as predictor
+# 
+# # Do not impute id, dx, sex, or YoE
+# pred[id_col, ]  <- 0
+# pred[dx_col, ]  <- 0
+# pred[sex_col, ] <- 0
+# pred[yoe_col, ] <- 0
+# pred[prac_col, ] <- 0
+# 
+# # Set method for PCA variables (multilevel predictive mean matching)
+# meth[pca_rows] <- "2l.pmm"
+# 
+# # Run MICE
+# imp <- mice(data_mice, method = meth, predictorMatrix = pred,
+#             m = 30, maxit = 10, seed = 123)
+# 
+# # Extract completed dataset
+# cog_pca_imputed <- complete(imp, 1)
+# cog_pca_imputed$id <- data_mice$id
+# cog[pca_vars] <- cog_pca_imputed[pca_vars]
+# 
+# write.csv(cog, "data_preprocessed/OASIS_longitudinal_imputed.csv", row.names = FALSE)
+```
+
+```{r}
+cog <- read.csv("data_preprocessed/OASIS_longitudinal_imputed.csv")
+
+pca_vars <- c("ANIMALS", "VEG", "digsym", "tma", "tmb", "PSY021")
+cog$dA <- cog$cog_age - cog$cog_age0
+min_dx_rows <- do.call(rbind, by(cog, cog$id, function(df) df[which.min(df$dx), ]))
+cog_pca_data <- na.omit(min_dx_rows[, pca_vars])
+
+pca_cog <- prcomp(cog_pca_data, center = TRUE, scale. = TRUE)
+pc1_loadings_cog <- -pca_cog$rotation[, 1]
+
+all_cog   <- as.matrix(cog[, pca_vars])
+cog$gCog0 <- as.numeric(all_cog %*% pc1_loadings_cog)
+
+for (v in pca_vars) {
+  f <- as.formula(paste0(v, " ~ prac + (1|id)"))
+  idx <- complete.cases(cog[, c(v, "cog_age0", "prac", "id")])
+  m <- lmer(f, data = cog[idx, ], REML = TRUE)
+  cog[[paste0(v, "_A0")]] <- NA
+  cog[[paste0(v, "_A0")]][idx] <- residuals(m)
+}
+cog$gCog_A0 <- as.numeric(
+  as.matrix(cog[, paste0(pca_vars, "_A0")]) %*% pc1_loadings_cog
+)
+
+for (v in pca_vars) {
+  f <- as.formula(paste0(v, " ~ cog_age0:dA + prac + (1|id)"))
+  idx <- complete.cases(cog[, c(v, "cog_age0", "dA", "prac", "id")])
+  m <- lmer(f, data = cog[idx, ], REML = TRUE)
+  cog[[paste0(v, "_A0dA")]] <- NA
+  cog[[paste0(v, "_A0dA")]][idx] <- residuals(m)
+}
+cog$gCog_A0dA <- as.numeric(
+  as.matrix(cog[, paste0(pca_vars, "_A0dA")]) %*% pc1_loadings_cog
+)
+
+for (v in pca_vars) {
+  f <- as.formula(paste0(v, " ~ s(cog_age) + prac"))
+  idx <- complete.cases(cog[, c(v, "cog_age", "prac", "id")])
+  m <- gamm(f, data   = cog[idx, ], random = list(id = ~1), REML   = TRUE)
+  cog[[paste0(v, "_gamm")]] <- NA
+  cog[[paste0(v, "_gamm")]][idx] <-
+    residuals(m$gam, type = "response")
+}
+cog$gCog_gamm <- as.numeric(
+  as.matrix(cog[, paste0(pca_vars, "_gamm")]) %*% pc1_loadings_cog
+)
+
+pc_summary    <- summary(pca_cog)
+var_explained <- round(pc_summary$importance[2, 1:3] * 100, 2)
+pc1_loadings  <- round(pca_cog$rotation[, 1]^2 * 100, 2)
+pc1_animals   <- pc1_loadings["ANIMALS"]
+pc1_veg       <- pc1_loadings["VEG"]
+pc1_digsym    <- pc1_loadings["digsym"]
+pc1_tma       <- pc1_loadings["tma"]
+pc1_tmb       <- pc1_loadings["tmb"]
+pc1_psy021    <- pc1_loadings["PSY021"]
+
+pc1_animals
+pc1_veg
+pc1_digsym
+pc1_tma
+pc1_tmb
+pc1_psy021
+
+```
+
+- DSST: `r pc1_digsym`%  
+- Trail Making B: `r pc1_tmb`%  
+- Trail Making A: `r pc1_tma`%  
+- WAIS Block Design: `r pc1_psy021`%  
+- Category Fluency (Animals): `r pc1_animals`%  
+- Category Fluency (Vegetables): `r pc1_veg`%
+
+### Cogntive slopes 
+```{r}
+eligible_ids <- unique(cog$id[cog$dx_unscaled >= 2])
+cog_long     <- cog[cog$id %in% eligible_ids, ]
+
+filtered_cog <- cog_long[complete.cases(cog_long[, c("dx", "gCog_A0", "gCog_A0dA", "gCog_gamm", "gCog0")]),]
+
+unique_ids <- unique(filtered_cog$id)
+n          <- length(unique_ids)
+
+gCog_slope_A0    <- rep(NA, n)
+gCog_slope_A0dA  <- rep(NA, n)
+gCog_slope_gamm  <- rep(NA, n)
+
+Sex <- rep(NA, n)
+YoE <- rep(NA, n)
+
+for (i in seq_len(n)) {
+
+  this_id     <- unique_ids[i]
+  subset_data <- filtered_cog[filtered_cog$id == this_id, ]
+
+  if (nrow(subset_data) >= 2) {
+
+    m_A0 <- lm(gCog_A0 ~ dx, data = subset_data)
+    gCog_slope_A0[i] <- coef(m_A0)[["dx"]]
+
+    m_A0dA <- lm(gCog_A0dA ~ dx, data = subset_data)
+    gCog_slope_A0dA[i] <- coef(m_A0dA)[["dx"]]
+
+    m_gammm <- lm(gCog_gamm ~ dx, data = subset_data)
+    gCog_slope_gamm[i] <- coef(m_gammm)[["dx"]]
+
+    wave0  <- subset_data[which.min(subset_data$dx), ]
+    Sex[i] <- wave0$Sex[1]
+    YoE[i] <- wave0$YoE[1]
+  }
+}
+
+cog_slopes <- data.frame(
+  id               = unique_ids,
+  gCog_slope_A0    = gCog_slope_A0,
+  gCog_slope_A0dA  = gCog_slope_A0dA,
+  gCog_slope_gamm  = gCog_slope_gamm,
+  Sex              = Sex,
+  YoE              = YoE,
+  stringsAsFactors = FALSE
+)
+
+m_re <- lmer(gCog0 ~ scale(A0) + scale(A0):dx + scale(prac) + (dx|id), data = filtered_cog, REML = TRUE)
+cog_slopes$gCog_slope_ranef <- ranef(m_re)$id[, "dx"]
+```
+
+### Brain slopes 
+```{r}
+freesurf$Volume    <- rowMeans(freesurf[, vol_cols], na.rm = TRUE)
+freesurf$Thickness <- rowMeans(freesurf[, thickness_cols], na.rm = TRUE)
+freesurf$Area      <- (freesurf$L.SurfArea + freesurf$R.SurfArea) / 2
+
+freesurf <- freesurf[
+  !is.na(freesurf$Thickness) &
+  !is.na(freesurf$Area) &
+  !is.na(freesurf$MR_age0),
+]
+
+freesurf$dA <- freesurf$MR_age - freesurf$MR_age0
+
+eligible_ids  <- unique(freesurf$id[freesurf$dx >= 2])
+freesurf_long <- freesurf %>% filter(id %in% eligible_ids)
+
+unique_ids <- unique(freesurf_long$id)
+n <- length(unique_ids)
+
+lh_thickness_cols <- grep("^lh_.*_thickness$", names(freesurf_long), value = TRUE)
+rh_thickness_cols <- grep("^rh_.*_thickness$", names(freesurf_long), value = TRUE)
+
+freesurf_long[paste0("mean_", sub("^lh_", "", lh_thickness_cols))] <-
+  (freesurf_long[lh_thickness_cols] + freesurf_long[rh_thickness_cols]) / 2
+
+ROIs_thickness_cols <- grep("^mean_.*_thickness", names(freesurf_long), value = TRUE)
+roi_names <- sub("^mean_(.*)_thickness$", "\\1", ROIs_thickness_cols)
+
+brain_vars <- c("Thickness", "Area", "CorticalWhiteMatterVol")
+
+for (v in brain_vars) {
+
+  m_A0 <- lmer(as.formula(paste0(v, " ~ 1 + (1|id)")), data = freesurf_long, REML = TRUE)
+  freesurf_long[[paste0(v, "_A0")]] <- residuals(m_A0)
+
+  m_A0dA <- lmer(as.formula(paste0(v, " ~ MR_age0:dA + (1|id)")), data = freesurf_long,REML = TRUE)
+  freesurf_long[[paste0(v, "_A0dA")]] <- residuals(m_A0dA)
+
+  m_gamm <- gamm(as.formula(paste0(v, " ~ s(MR_age)")),data   = freesurf_long, random = list(id = ~1), REML   = TRUE)
+  freesurf_long[[paste0(v, "_gamm")]] <- residuals(m_gamm$gam, type = "response")
+}
+
+for (roi in ROIs_thickness_cols) {
+  
+  m_A0 <- lmer(as.formula(paste0(roi, " ~ 1 + (1|id)")),data = freesurf_long, REML = TRUE)
+  freesurf_long[[paste0(roi, "_A0")]] <- residuals(m_A0)
+  
+  m_A0dA <- lmer(as.formula(paste0(roi, " ~ MR_age0:dA + (1|id)")), data = freesurf_long, REML = TRUE)
+  freesurf_long[[paste0(roi, "_A0dA")]] <- residuals(m_A0dA)
+
+  m_gamm <- gamm(as.formula(paste0(roi, " ~ s(MR_age)")),data   = freesurf_long, random = list(id = ~1),REML   = TRUE)
+  freesurf_long[[paste0(roi, "_gamm")]] <- residuals(m_gamm$gam, type = "response")
+}
+
+mk_slope_mat <- function(suffix, vars) {
+  matrix(
+    NA, nrow = n, ncol = length(vars),
+    dimnames = list(NULL, paste0(vars, "_", suffix, "_slope"))
+  )
+}
+
+brain_slopes_A0    <- mk_slope_mat("A0", brain_vars)
+brain_slopes_A0dA  <- mk_slope_mat("A0dA", brain_vars)
+brain_slopes_gamm  <- mk_slope_mat("gamm", brain_vars)
+
+roi_slopes_A0      <- mk_slope_mat("A0", roi_names)
+roi_slopes_A0dA    <- mk_slope_mat("A0dA", roi_names)
+roi_slopes_gamm    <- mk_slope_mat("gamm", roi_names)
+
+Thickness_baseline <- numeric(n)
+Area_baseline      <- numeric(n)
+
+A0 <- numeric(n)
+
+for (i in seq_len(n)) {
+
+  sid <- unique_ids[i]
+  d   <- freesurf_long[freesurf_long$id == sid, ]
+
+  if (nrow(d) >= 2) {
+    
+    for (j in seq_along(brain_vars)) {
+      v <- brain_vars[j]
+      brain_slopes_A0[i, j]   <- coef(lm(d[[paste0(v,"_A0")]]   ~ d$dx))[2]
+      brain_slopes_A0dA[i, j] <- coef(lm(d[[paste0(v,"_A0dA")]] ~ d$dx))[2]
+      brain_slopes_gamm[i, j] <- coef(lm(d[[paste0(v,"_gamm")]] ~ d$dx))[2]
+    }
+
+    for (j in seq_along(roi_names)) {
+      roi <- paste0("mean_", roi_names[j], "_thickness")
+      roi_slopes_A0[i, j]   <- coef(lm(d[[paste0(roi,"_A0")]]   ~ d$dx))[2]
+      roi_slopes_A0dA[i, j] <- coef(lm(d[[paste0(roi,"_A0dA")]] ~ d$dx))[2]
+      roi_slopes_gamm[i, j] <- coef(lm(d[[paste0(roi,"_gamm")]] ~ d$dx))[2]
+    }
+
+    wave0 <- d[which.min(d$dx), ]
+    A0[i]  <- wave0$MR_age0
+    Thickness_baseline[i] <- wave0$Thickness[1]
+    Area_baseline[i]      <- wave0$Area[1]
+  }
+}
+
+gm_slopes <- data.frame(
+  id = unique_ids,
+  A0 = A0,
+  Thickness_baseline = Thickness_baseline,
+  Area_baseline = Area_baseline, 
+  brain_slopes_A0,
+  brain_slopes_A0dA,
+  brain_slopes_gamm,
+  roi_slopes_A0,
+  roi_slopes_A0dA,
+  roi_slopes_gamm,
+  stringsAsFactors = FALSE
+)
+
+m_re_thk <- lmer(Thickness ~ scale(MR_age0) + scale(MR_age0):dx + (dx|id), data = freesurf_long, REML = TRUE)
+gm_slopes$Thickness_ranef_slope <- ranef(m_re_thk)$id[, "dx"]
+
+m_re_sa <- lmer(Area ~ scale(MR_age0) + scale(MR_age0):dx + (dx|id), data = freesurf_long, REML = TRUE)
+gm_slopes$Area_ranef_slope <- ranef(m_re_sa)$id[, "dx"]
+```
+
+```{r}
+
+mydata_slopes <- merge(gm_slopes, cog_slopes, by = "id")
+
+length(unique(mydata_slopes$id))
+min(mydata_slopes$A0)
+max(mydata_slopes$A0)
+mean(mydata_slopes$A0)
+sd(mydata_slopes$A0)
+
+length(unique(mydata_slopes$id[mydata_slopes$Sex == 1]))
+length(unique(mydata_slopes$id[mydata_slopes$Sex == 2]))
+
+```
+
+```{r}
+
+freesurf_long_wav <- freesurf_long[freesurf_long$id %in% mydata_slopes$id, ]
+cog_long_wav      <- cog_long[cog_long$id %in% mydata_slopes$id, ]
+
+# Prepare data for MR barplot
+wav_df_mr <- as.data.frame(table(table(freesurf_long_wav$id)))
+colnames(wav_df_mr) <- c("NumSessions", "NumParticipants")
+wav_df_mr$NumSessions <- as.numeric(as.character(wav_df_mr$NumSessions))
+wav_df_mr$NumParticipants <- as.numeric(wav_df_mr$NumParticipants)
+
+a <- ggplot(wav_df_mr, aes(x = NumSessions, y = NumParticipants)) +
+  geom_bar(stat = "identity", fill = "darkgrey", color = "white") +
+  geom_text(aes(label = NumParticipants), vjust = -0.5, size = 5) +
+  labs(x = "Number of MR Testing Sessions", y = "Number of Participants") +
+  scale_x_continuous(breaks = c(2, 4, 6, 8, 10)) +
+  theme_minimal()
+
+# Prepare data for Cognitive barplot
+wav_df_cog <- as.data.frame(table(table(cog_long_wav$id)))
+colnames(wav_df_cog) <- c("NumSessions", "NumParticipants")
+wav_df_cog$NumSessions <- as.numeric(as.character(wav_df_cog$NumSessions))
+wav_df_cog$NumParticipants <- as.numeric(wav_df_cog$NumParticipants)
+
+b <- ggplot(wav_df_cog, aes(x = NumSessions, y = NumParticipants)) +
+  geom_bar(stat = "identity", fill = "darkgrey", color = "white") +
+  geom_text(aes(label = NumParticipants), vjust = -0.5, size = 5) +
+  labs(x = "Number of Cognitive Testing Sessions", y = "Number of Participants") +
+  ylim(0, max(wav_df_cog$NumParticipants) * 1.15) +
+  theme_minimal()
+
+
+c <- ggplot(freesurf_long_wav, aes(x = dx, y = factor(id))) +  
+     geom_point(alpha = 0.7, size = 1) +       
+     geom_line(aes(group = id), alpha = 0.3) + 
+     # geom_vline(xintercept = 6, linetype = 5, color = "yellow", size = 1) +
+     scale_y_discrete(expand = expansion(mult = c(0.1, 0.1))) +  # add margin top & bottom
+     theme_minimal() +
+     labs(x = "Time (MR data)", y = "Participants") +
+     theme(
+      legend.position = "none",
+      axis.text.y = element_blank(),   
+      axis.ticks.y = element_blank() 
+     ) + xlim(0,30)
+
+cog_long_wav <- cog_long[cog_long$id %in% mydata_slopes$id, ]
+d <- ggplot(cog_long_wav, aes(x = dx, y = factor(id))) +  
+     geom_point(alpha = 0.7, size = 1) +       
+     geom_line(aes(group = id), alpha = 0.3) + 
+     # geom_vline(xintercept = 6, linetype = 5, color = "yellow", size = 1) +
+     scale_y_discrete(expand = expansion(mult = c(0.1, 0.1))) +  # add margin top & bottom
+     theme_minimal() +
+     labs(x = "Time (Cognitive data)", y = "Participants") +
+     theme(
+      legend.position = "none",
+      axis.text.y = element_blank(),   
+      axis.ticks.y = element_blank() 
+     ) + xlim(0,30)
+
+
+label_theme <- theme(
+  axis.title.x = element_text(size = 20),
+  axis.title.y = element_text(size = 20),
+  axis.text.x  = element_text(size = 14)
+)
+
+
+a <- a + label_theme
+b <- b + label_theme
+c <- c + label_theme
+d <- d + label_theme
+
+combined <- (a | b) / (c | d)
+print(combined)
+
+ggsave("combined_plot.png", plot = combined, width = 16, height = 12, dpi = 300)
+```
+
+```{r}
+write.csv(mydata_slopes, "data_preprocessed/OASIS_longitudinal_gCog_GM_5Sep25.csv", row.names = FALSE)
+write.csv(freesurf_long, "data_preprocessed/OASIS_longitudinal_GM_5Sep25.csv", row.names = FALSE)
+```
+
+# Cross-sectional data preparation 
+### Lag-matching algorithm 
+```{r}
+fs <- as.data.table(freesurf)
+cg <- as.data.table(cog)
+
+fs[, lag_years_fs  := lag_years]
+cg[, lag_years_cog := lag_years]
+
+setnames(fs, old = c("id", "dx", "wave", "MR_age"), new = c("id_fs", "dx_fs", "wave_fs", "MR_age_fs"), skip_absent = TRUE)
+setnames(cg, old = c("id", "dx", "wave", "cog_age"), new = c("id_cg", "dx_cg", "wave_cg", "cog_age_cg"), skip_absent = TRUE)
+
+results <- vector("list", nrow(fs))
+cg[, matched := FALSE]
+
+for (i in seq_len(nrow(fs))) {
+
+  id_i  <- fs$id_fs[i]
+  lag_i <- fs$lag_years_fs[i]
+
+  candidates <- cg[id_cg == id_i & matched == FALSE]
+
+  if (nrow(candidates) == 0) {
+    results[[i]] <- cbind(fs[i], cog_match = NA, lag_diff = NA)
+    next
+  }
+
+  diffs <- abs(candidates$lag_years_cog - lag_i)
+  min_idx <- which.min(diffs)
+  best_match <- candidates[min_idx]
+
+  best_match$lag_diff <- diffs[min_idx]
+  results[[i]] <- cbind(fs[i], best_match)
+
+  cg[rownames(cg) == rownames(best_match), matched := TRUE]
+}
+
+mydata_matched            <- rbindlist(results, fill = TRUE)
+mydata_different_rates    <- mydata_matched[(dx_fs != 0) | (dx_fs == 0 & lag_diff < 1)]
+mydata_corresponding_lags <- mydata_matched[mydata_matched$lag_diff < 1, ]
+
+length(unique(mydata_matched$id_fs)) #1316
+length(unique(mydata_different_rates$id_fs)) #1275
+length(unique(mydata_corresponding_lags$id_fs)) #1269
+
+mydata                    <- mydata_corresponding_lags
+mydata_different_rates    <- as_tibble(mydata_different_rates, .name_repair = "unique")
+mydata_different_rates$id <- mydata_different_rates$id_fs
+
+mydata_cross <- mydata_different_rates
+
+mydata_cross <- do.call(rbind, by(mydata_cross, mydata_cross$id, function(df) {
+  df[which.min(df$dx_fs), , drop = FALSE]
+}))
+
+mydata_cross$Age <- mydata_cross$A0...210
+mydata_cross     <- mydata_cross[, c("id", "Age", "gCog0", "Thickness", "Area", "Sex", "YoE")]
+mydata_cross     <- na.omit(mydata_cross[, c("id", "Age", "gCog0", "Thickness", "Area", "Sex", "YoE")])
+```
+
+```{r}
+write.csv(mydata_cross, "data_preprocessed/OASIS_cross_sectional_gCog_GM_5Sep25.csv", row.names = FALSE)
+write.csv(mydata, "data_preprocessed/OASIS_corresponding_lags.csv", row.names = FALSE)
+```
