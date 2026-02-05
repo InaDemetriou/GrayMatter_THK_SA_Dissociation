@@ -1,0 +1,143 @@
+---
+title: "HABS LongCombat (Thickness & Surface Area)"
+output: html_document
+---
+
+```{r}
+# install.packages("devtools")
+# devtools::install_github("jcbeer/longCombat")
+library(dplyr)
+library(lmerTest)
+library(longCombat) 
+```
+
+```{r}
+HABS_HD_release_7 <- read.csv("data_raw/HABS_HD_7_Original.csv")
+Demographics      <- read.csv("data_raw/Demographics.csv")
+
+lh_area <- read_table("data_raw/Didac_aparc_/lh.aparc.area.txt")
+rh_area <- read_table("data_raw/Didac_aparc_/rh.aparc.area.txt")
+
+lh_thk <- read_table("data_raw/Didac_aparc_/lh.aparc.thickness.txt")
+rh_thk <- read_table("data_raw/Didac_aparc_/rh.aparc.thickness.txt")
+
+
+names(lh_area)[names(lh_area) == "lh.aparc.area"] <- "ID"
+names(rh_area)[names(rh_area) == "rh.aparc.area"] <- "ID"
+names(lh_thk)[names(lh_thk) == "lh.aparc.thickness"] <- "ID"
+names(rh_thk)[names(rh_thk) == "rh.aparc.thickness"] <- "ID"
+
+Didac_data <- lh_area %>%
+  left_join(rh_area, by = "ID") %>%
+  left_join(lh_thk,  by = "ID") %>%
+  left_join(rh_thk,  by = "ID")
+
+Didac_data <- Didac_data %>%
+  mutate(
+    Med_ID = str_extract(ID, "^\\d{4}"),
+    Visit_ID = case_when(
+      str_detect(ID, "_BL")  ~ 1,
+      str_detect(ID, "_M24") ~ 2,
+      str_detect(ID, "_M48") ~ 3,
+      str_detect(ID, "_M72") ~ 4,
+      TRUE ~ NA_real_
+    )
+  )
+
+# Didac_data        <- read.csv("data_raw/Didac_Data.csv")
+scanner_data      <- read.csv("data_raw/Scanner.csv")
+
+HABS_HD_release_7        <- merge(HABS_HD_release_7, Demographics, by = c("Med_ID", "Visit_ID"))
+HABS_HD_release_7        <- HABS_HD_release_7[ , !grepl("\\.y$", names(HABS_HD_release_7))]
+names(HABS_HD_release_7) <- sub("\\.x$", "", names(HABS_HD_release_7))
+
+mydata                   <- merge(HABS_HD_release_7, Didac_data, by = c("Med_ID", "Visit_ID"))
+mydata                   <- merge(mydata, scanner_data, by = c("Med_ID", "Visit_ID"))
+
+names(mydata)[names(mydata) == "EducationYears"] <- "YoE"
+
+mydata[mydata == "NULL"]  <- NA
+mydata[mydata == "-9999"] <- NA
+
+mydata <- mydata %>%
+  arrange(Med_ID, Age) %>%
+  group_by(Med_ID) %>%
+  mutate(
+    A0 = first(Age),
+    dA   = Age - A0
+  ) %>%
+  ungroup()
+
+```
+
+```{r}
+# write.csv(mydata, "COMBAT_data/HABS_preCOMBAT_data.csv")
+```
+
+```{r}
+mydata <- read.csv("COMBAT_data/HABS_preCOMBAT_data.csv")
+
+lh_thickness_cols <- grep("^lh_.*_thickness$", names(mydata), value = TRUE)
+rh_thickness_cols <- grep("^rh_.*_thickness$", names(mydata), value = TRUE)
+
+lh_area_cols <- grep("^lh_.*_area$", names(mydata), value = TRUE)
+rh_area_cols <- grep("^rh_.*_area$", names(mydata), value = TRUE)
+
+mydata[paste0("mean_", sub("^lh_", "", lh_thickness_cols))] <-
+  (mydata[lh_thickness_cols] + mydata[rh_thickness_cols]) / 2
+
+mydata[paste0("mean_", sub("^lh_", "", lh_area_cols))] <-
+  (mydata[lh_area_cols] + mydata[rh_area_cols]) / 2
+
+df = subset(mydata, !is.na(mean_MeanThickness_thickness) & !is.na(mean_WhiteSurfArea_area) & !is.na(eTIV.x) & !is.na(MRI_Scanner)  & !is.na(Age) & !is.na(Ethnicity) & !is.na(Gender) & !(MRI_Scanner==" ") & !(CognitiveStatus == " ")) 
+
+dup_rows <- duplicated(df[c("Med_ID", "Visit_ID")])
+df_second_row <- df[dup_rows, ]
+df <- df[!dup_rows, ]
+
+df <- df %>%
+  group_by(Med_ID) %>%
+  mutate(
+    CS = if_else(all(CognitiveStatus == "CI"), "CI", "CU")
+  ) %>%
+  ungroup()
+
+df$CS = as.factor(df$CS)
+
+# # count observations per subject
+# obs_per_id <- table(df$Med_ID)        
+# table(sort(obs_per_id, decreasing = TRUE) >= 1)  # at least 1
+# table(sort(obs_per_id, decreasing = TRUE) >= 2)  # at least 2
+# table(sort(obs_per_id, decreasing = TRUE) >= 3)  # at least 3
+# sapply(1:max(obs_per_id), function(n) sum(obs_per_id >= n))
+
+df$A0Z   = scale(df$A0)
+df$dAZ   = scale(df$dA)
+df$eTIV  = scale(df$eTIV.x)
+
+df$MRI_Scanner  = factor(df$MRI_Scanner)
+df$Ethnicity    = factor(df$Ethnicity)
+df$Gender       = factor(df$Gender)
+
+area_cols <- grep("^mean_.*_area$", names(mydata), value = TRUE)
+thk_cols  <- grep("^mean_.*_thickness$", names(mydata), value = TRUE)
+```
+
+```{r}
+combat_cols <- c(area_cols, thk_cols)
+df_combat <- df[, c("Med_ID", "Visit_ID", "Age", "MRI_Scanner", "dAZ", "A0Z", "Ethnicity","Gender", "YoE", "CS", combat_cols)]
+
+data_combat <- longCombat(
+  idvar     = "Med_ID",
+  batchvar  = "MRI_Scanner",
+  feature   = combat_cols,  
+  formula   = 'A0Z * dAZ * CS + Ethnicity + Gender + YoE',
+  ranef     = "(1|Med_ID)",
+  timevar   = "dAZ",
+  data      = df_combat)
+
+data_harmonized <- data_combat$data_combat
+df <- merge(df_combat, data_harmonized, by = c("Med_ID", "dAZ"))
+
+write.csv(df, "COMBAT_data/HABS_data_longCombatCorrected.csv")
+```
