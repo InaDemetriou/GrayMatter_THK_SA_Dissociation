@@ -1,0 +1,152 @@
+---
+title: "HABS 'g' factor"
+output: html_document
+---
+
+```{r}
+library(dplyr)
+library(miceadds)
+library(lmerTest)
+library(gamm4)
+```
+
+```{r}
+mydata <- read.csv("data_raw/HABS_HD_7_Original.csv")
+
+mydata[mydata == "NULL"]  <- NA
+mydata[mydata == "-9999"] <- NA
+
+mydata <- mydata %>%
+  arrange(Med_ID, Age) %>%
+  group_by(Med_ID) %>%
+  mutate(
+    A0 = first(Age),
+    dA   = Age - A0
+  ) %>%
+  ungroup()
+mydata <- mydata[mydata$dA != 12.00, ]
+names(mydata)[names(mydata) == "EducationYears"] <- "YoE"
+names(mydata)[names(mydata) == "Gender"] <- "Sex"
+
+mydata <- mydata[, c("Med_ID", "Visit_ID", "A0", "dA", "Sex", "YoE", "Trails_A_Time", "Trails_B_Time", "FAS_Total", "Animal_Total", "Digit_Symbol_Substitution", "DS_Total", "MMSE_Total", "Age")]
+
+write.csv(mydata, "COG_data/HABS_gCog_data.csv")
+```
+
+```{r}
+mydata <- read.csv("COG_data/HABS_gCog_data.csv")
+
+# plot(density(mydata$Trails_A_Time, na.rm = TRUE))
+# plot(density(mydata$Trails_B_Time, na.rm = TRUE))
+
+mydata$Trails_B_Time[mydata$Trails_B_Time >= 300] <- NA
+mydata$Trails_A_Time[mydata$Trails_A_Time >= 150] <- NA
+
+# plot(density(mydata$Trails_A_Time, na.rm = TRUE))
+# plot(density(mydata$Trails_B_Time, na.rm = TRUE))
+
+mydata$FAS_Total     <- scale(as.numeric(mydata$FAS_Total))
+mydata$Animal_Total  <- scale(as.numeric(mydata$Animal_Total))
+mydata$DSS           <- scale(as.numeric(mydata$Digit_Symbol_Substitution))
+mydata$DS_Total      <- scale(as.numeric(mydata$DS_Total))
+
+mydata$TMA           <- (-1) * scale(log(as.numeric(mydata$Trails_A_Time)))
+mydata$TMB           <- (-1) * scale(log(as.numeric(mydata$Trails_B_Time)))
+
+mydata      <- mydata %>% arrange(Med_ID, dA)
+mydata$prac <- 1
+mydata$prac[!duplicated(mydata$Med_ID)] <- 0
+mydata$prac <- as.factor(mydata$prac)
+```
+
+```{r}
+# pca_vars     <- c("TMA", "TMB", "FAS_Total", "Animal_Total", "DSS", "DS_Total")
+# mydata[pca_vars] <- lapply(mydata[pca_vars], function(x) as.numeric(as.vector(x)))
+# vars_for_mice <- c("Med_ID", "dA", "Sex", "YoE", "prac", pca_vars)
+# data_mice <- mydata[, vars_for_mice]
+# data_mice$Med_ID <- as.integer(as.factor(data_mice$Med_ID))
+# 
+# ini  <- mice(data_mice, maxit = 0)
+# pred <- ini$predictorMatrix
+# meth <- ini$method
+# 
+# pca_rows <- match(pca_vars, colnames(pred))
+# id_col   <- match("Med_ID", colnames(pred))
+# dA_col   <- match("dA", colnames(pred))
+# sex_col  <- match("Sex", colnames(pred))
+# yoe_col  <- match("YoE", colnames(pred))
+# prac_col <- match("prac", colnames(pred))
+# 
+# pred[pca_rows, id_col]   <- -2   # cluster variable
+# pred[pca_rows, dA_col]   <-  1   # include dA as predictor
+# pred[pca_rows, sex_col]  <-  1   # include sex as predictor
+# pred[pca_rows, yoe_col]  <-  1   # include YoE as predictor
+# pred[pca_rows, prac_col] <-  1  # include YoE as predictor
+# 
+# # Do not impute id, dx, sex, or YoE
+# pred[id_col, ]   <- 0
+# pred[dA_col, ]   <- 0
+# pred[sex_col, ]  <- 0
+# pred[yoe_col, ]  <- 0
+# pred[prac_col, ] <- 0
+# 
+# # Set method for PCA variables (multilevel predictive mean matching)
+# meth[pca_rows] <- "2l.pmm"
+# 
+# # Run MICE
+# imp <- mice(data_mice, method = meth, predictorMatrix = pred,
+#             m = 30, maxit = 10, seed = 123)
+# 
+# # Extract completed dataset
+# cog_pca_imputed        <- complete(imp, 1)
+# cog_pca_imputed$Med_ID <- data_mice$Med_ID
+# mydata[pca_vars]       <- cog_pca_imputed[pca_vars]
+# 
+# write.csv(mydata, "COG_data/HABS_gCog_data_imputed.csv")
+```
+
+```{r}
+mydata <- read.csv("COG_data/HABS_gCog_data_imputed.csv")
+
+pca_vars <- c("TMA", "TMB", "FAS_Total", "Animal_Total", "DSS", "DS_Total")
+
+cog_pca_data <- na.omit(mydata[mydata$Visit_ID == 1, pca_vars])
+pca_cog <- prcomp(cog_pca_data, center = TRUE, scale. = TRUE)
+pc1_loadings_cog <- -pca_cog$rotation[, 1]
+
+all_cog      <- as.matrix(mydata[, pca_vars])
+mydata$gCog0 <- as.numeric(all_cog %*% pc1_loadings_cog)
+
+for (v in pca_vars) {
+  ## A0
+  f_A0 <- as.formula(paste0(v, " ~ prac + (1|Med_ID)"))
+  idx  <- complete.cases(mydata[, c(v, "A0", "prac", "Med_ID")])
+  m_A0 <- lmer(f_A0, data = mydata[idx, ], REML = TRUE)
+
+  mydata[[paste0(v, "_A0")]] <- NA
+  mydata[[paste0(v, "_A0")]][idx] <- residuals(m_A0)
+
+  ## A0:dA
+  f_A0dA <- as.formula(paste0(v, " ~ A0:dA + prac + (1|Med_ID)"))
+  idx  <- complete.cases(mydata[, c(v, "A0", "dA", "prac", "Med_ID")])
+  m_A0dA <- lmer(f_A0dA, data = mydata[idx, ], REML = TRUE)
+
+  mydata[[paste0(v, "_A0dA")]] <- NA
+  mydata[[paste0(v, "_A0dA")]][idx] <- residuals(m_A0dA)
+
+  ## gamm
+  f_gamm <- as.formula(paste0(v, " ~ s(Age) + prac"))
+  idx <- complete.cases(mydata[, c(v, "Age", "prac", "Med_ID")])
+  m_gamm <- gamm(f_gamm, data   = mydata[idx, ], random = list(Med_ID = ~1), REML = TRUE)
+
+  mydata[[paste0(v, "_gamm")]] <- NA
+  mydata[[paste0(v, "_gamm")]][idx] <-
+  residuals(m_gamm$gam, type = "response")
+}
+
+mydata$gCog_A0   <- as.numeric(as.matrix(mydata[, paste0(pca_vars, "_A0")]) %*% pc1_loadings_cog)
+mydata$gCog_A0dA <- as.numeric(as.matrix(mydata[, paste0(pca_vars, "_A0dA")]) %*% pc1_loadings_cog)
+mydata$gCog_gamm <- as.numeric(as.matrix(mydata[, paste0(pca_vars, "_gamm")]) %*% pc1_loadings_cog)
+
+write.csv(mydata,"COG_data/HABS_gCog_data_g_derived.csv",row.names = FALSE)
+```
