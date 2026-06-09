@@ -1,0 +1,945 @@
+---
+title: "HASB_combat"
+output:
+  html_document: default
+  pdf_document: default
+  word_document: default
+date: "2026-05-26"
+---
+
+```{r}
+# install.packages("devtools")
+# devtools::install_github("jcbeer/longCombat")
+library(dplyr)
+library(lmerTest)
+library(longCombat) 
+library(tidyverse)
+library(lme4)
+library(ggplot2)
+library(ggpubr)
+library(patchwork)
+mydata <- read.csv("COMBAT_data/HABS_preCOMBAT_data.csv")
+mydata$Volume  <- mydata$CortexVol
+
+lh_thickness_cols <- grep("^lh_.*_thickness$", names(mydata), value = TRUE)
+rh_thickness_cols <- grep("^rh_.*_thickness$", names(mydata), value = TRUE)
+
+lh_area_cols <- grep("^lh_.*_area$", names(mydata), value = TRUE)
+rh_area_cols <- grep("^rh_.*_area$", names(mydata), value = TRUE)
+
+mydata[paste0("mean_", sub("^lh_", "", lh_thickness_cols))] <-
+  (mydata[lh_thickness_cols] + mydata[rh_thickness_cols]) / 2
+
+mydata[paste0("mean_", sub("^lh_", "", lh_area_cols))] <-
+  (mydata[lh_area_cols] + mydata[rh_area_cols]) / 2
+
+mydata$mean_WhiteSurfArea_area <- mydata$lh_WhiteSurfArea_area + mydata$rh_WhiteSurfArea_area
+
+df = subset(mydata, !is.na(mean_MeanThickness_thickness) & !is.na(mean_WhiteSurfArea_area) & !is.na(eTIV.x) & !is.na(MRI_Scanner)  & !is.na(Age) & !is.na(Ethnicity) & !is.na(Gender) & !(MRI_Scanner==" ") & !(CognitiveStatus == " ")) 
+
+dup_rows <- duplicated(df[c("Med_ID", "Visit_ID")])
+df_second_row <- df[dup_rows, ]
+df <- df[!dup_rows, ]
+
+df <- df %>%
+  group_by(Med_ID) %>%
+  mutate(
+    CS = if_else(all(CognitiveStatus == "CI"), "CI", "CU")
+  ) %>%
+  ungroup()
+
+df$CS = as.factor(df$CS)
+df = df[df$CS == "CU", ]
+
+# # count observations per subject
+# obs_per_id <- table(df$Med_ID)        
+# table(sort(obs_per_id, decreasing = TRUE) >= 1)  # at least 1
+# table(sort(obs_per_id, decreasing = TRUE) >= 2)  # at least 2
+# table(sort(obs_per_id, decreasing = TRUE) >= 3)  # at least 3
+# sapply(1:max(obs_per_id), function(n) sum(obs_per_id >= n))
+
+df$A0Z   = scale(df$A0)
+df$dAZ   = scale(df$dA)
+df$eTIV  = scale(df$eTIV.x)
+df$YoE  = scale(df$YoE)
+
+df$MRI_Scanner  = factor(df$MRI_Scanner)
+df$Ethnicity    = factor(df$Ethnicity)
+df$Gender       = factor(df$Gender)
+
+df$mean_WhiteSurfArea_area = df$mean_WhiteSurfArea_area/34
+df$mean_Volume = (df$lhCortexVol + df$rhCortexVol)/34
+
+area_cols_ROIs <- grep("^mean_.*_area$", names(df), value = TRUE)
+thk_cols_ROIs  <- grep("^mean_.*_thickness$", names(df), value = TRUE)
+
+area_cols_loop <- setdiff(area_cols_ROIs, "mean_WhiteSurfArea_area")
+thk_cols_loop  <- setdiff(thk_cols_ROIs,  "mean_MeanThickness_thickness")
+region_names <- sub("_area$", "", area_cols_loop)
+for (r in region_names) {
+  df[, paste0(r, "_volume")] <- df[, paste0(r, "_area")] * df[, paste0(r, "_thickness")]
+}
+vol_cols_ROIs <- paste0(region_names, "_volume")
+
+thk_cols <- c("lh_MeanThickness_thickness", "rh_MeanThickness_thickness")
+area_cols <- c("lh_WhiteSurfArea_area", "rh_WhiteSurfArea_area")
+vol_cols <- c("lhCortexVol", "rhCortexVol")
+
+vol_cols_ROIs <- c(vol_cols_ROIs, "mean_Volume")
+
+# pooled_cols <- c("mean_MeanThickness_thickness", "mean_WhiteSurfArea_area")
+
+# df %>% 
+#   filter(Ethnicity == "Black", MRI_Scanner == "Skyra") %>% 
+#   select(Med_ID, Visit_ID, MRI_Scanner, Ethnicity, Age)
+# black_skyra_ids <- df %>%
+#   filter(Ethnicity == "Black", MRI_Scanner == "Skyra") %>%
+#   pull(Med_ID) %>%
+#   unique()
+# df <- df[!df$Med_ID %in% black_skyra_ids, ]
+```
+
+```{r}
+# 
+# p_area_eth_pre <- df %>%
+#   filter(!is.na(mean_WhiteSurfArea_area)) %>%
+#   group_by(Visit_ID, MRI_Scanner, Ethnicity) %>%
+#   summarise(mean_area = mean(mean_WhiteSurfArea_area, na.rm = TRUE),
+#             se_area   = sd(mean_WhiteSurfArea_area,   na.rm = TRUE) / sqrt(n()),
+#             .groups   = "drop") %>%
+#   ggplot(aes(x = Visit_ID, y = mean_area, 
+#              colour = MRI_Scanner, group = MRI_Scanner)) +
+#   annotate("rect", xmin = 1.5, xmax = 2.5, ymin = -Inf, ymax = Inf,
+#            fill = "yellow", alpha = 0.2) +
+#   geom_line(linewidth = 1.2) +
+#   geom_point(size = 3) +
+#   geom_errorbar(aes(ymin = mean_area - se_area,
+#                     ymax = mean_area + se_area), width = 0.1) +
+#   scale_colour_manual(values = c("#6D9EC1", "#E46726")) +
+#   facet_wrap(~ Ethnicity) +
+#   labs(x = "Visit", y = "Mean surface area (mm²)",
+#        colour = "Scanner",
+#        title  = "Surface area by scanner per visit") +
+#   theme_minimal()
+# 
+# p_thk_eth_pre <- df %>%
+#   filter(!is.na(mean_MeanThickness_thickness)) %>%
+#   group_by(Visit_ID, MRI_Scanner, Ethnicity) %>%
+#   summarise(mean_thk = mean(mean_MeanThickness_thickness, na.rm = TRUE),
+#             se_thk   = sd(mean_MeanThickness_thickness,   na.rm = TRUE) / sqrt(n()),
+#             .groups  = "drop") %>%
+#   ggplot(aes(x = Visit_ID, y = mean_thk,
+#              colour = MRI_Scanner, group = MRI_Scanner)) +
+#   annotate("rect", xmin = 1.5, xmax = 2.5, ymin = -Inf, ymax = Inf,
+#            fill = "yellow", alpha = 0.2) +
+#   geom_line(linewidth = 1.2) +
+#   geom_point(size = 3) +
+#   geom_errorbar(aes(ymin = mean_thk - se_thk,
+#                     ymax = mean_thk + se_thk), width = 0.1) +
+#   scale_colour_manual(values = c("#6D9EC1", "#E46726")) +
+#   facet_wrap(~ Ethnicity) +
+#   labs(x = "Visit", y = "Mean thickness (mm)",
+#        colour = "Scanner",
+#        title  = "Thickness by scanner per visit") +
+#   theme_minimal()
+# 
+# p_age_eth <- df %>%
+#   filter(!is.na(Age), Visit_ID %in% c(1, 2)) %>%
+#   ggplot(aes(x = MRI_Scanner, y = Age, fill = MRI_Scanner)) +
+#   geom_violin(alpha = 0.6) +
+#   geom_boxplot(width = 0.15, outlier.shape = NA, fill = "white") +
+#   facet_wrap(~ Ethnicity) +
+#   scale_fill_manual(values = c("#6D9EC1", "#E46726")) +
+#   labs(x = "Scanner", y = "Age",
+#        fill  = "Scanner",
+#        title = "Age distribution by scanner and ethnicity (Visits 1-2 only)") +
+#   theme_minimal() +
+#   theme(legend.position = "none")
+# 
+# p_age_eth 
+# 
+# # Age distribution by scanner at each visit with significance
+# p1 <- ggplot(df[df$Visit_ID %in% c(1,2),],
+#              aes(x = factor(MRI_Scanner), y = Age, fill = factor(MRI_Scanner))) +
+#   geom_violin(alpha = 0.6) +
+#   geom_boxplot(width = 0.15, outlier.shape = NA, fill = "white") +
+#   stat_compare_means(comparisons = list(c("Skyra", "Vida1")),
+#                      method = "wilcox.test",
+#                      label = "p.signif",
+#                      tip.length = 0.01,
+#                      label.size  = 8) +
+#   facet_wrap(~ Visit_ID, labeller = label_both) +
+#   scale_fill_manual(values = c("#6D9EC1", "#E46726")) +
+#   labs(x = "Scanner", y = "Age", title = "Age distribution by scanner") +
+#   theme_minimal() +
+#   theme(legend.position = "none")
+# 
+# # Ethnicity composition by scanner at each visit
+# p2 <- df[df$Visit_ID %in% c(1,2),] %>%
+#   group_by(Visit_ID, MRI_Scanner, Ethnicity) %>%
+#   summarise(n = n(), .groups = "drop") %>%
+#   group_by(Visit_ID, MRI_Scanner) %>%
+#   mutate(prop = n / sum(n)) %>%
+#   ggplot(aes(x = factor(MRI_Scanner), y = prop, fill = Ethnicity)) +
+#   geom_bar(stat = "identity", position = "stack") +
+#   facet_wrap(~ Visit_ID, labeller = label_both) +
+#   scale_fill_brewer(palette = "Set2") +
+#   labs(x = "Scanner", y = "Proportion", title = "Ethnicity composition by scanner") +
+#   theme_minimal()
+# 
+# # Age × Scanner × Ethnicity
+# p3 <- ggplot(df[df$Visit_ID %in% c(1,2),],
+#              aes(x = Age, y = factor(MRI_Scanner), colour = Ethnicity)) +
+#   geom_jitter(alpha = 0.4, height = 0.15, size = 1) +
+#   facet_wrap(~ Visit_ID, labeller = label_both) +
+#   scale_colour_brewer(palette = "Set2") +
+#   labs(x = "Age", y = "Scanner",
+#        title = "Age × Scanner × Ethnicity",
+#        subtitle = "Shows joint colinearity of all three") +
+#   theme_minimal()
+# 
+# p1 / p2  +
+#   plot_annotation(
+#     title   = "Scanner colinearity with Age and Ethnicity",
+#     caption = "Visits 3-4 excluded: single scanner only"
+#   )
+# 
+# # Compute p-values per visit
+# pvals <- df[df$Visit_ID %in% c(1,2),] %>%
+#   group_by(Visit_ID) %>%
+#   summarise(p     = wilcox.test(Age ~ MRI_Scanner)$p.value,
+#             label = case_when(p < 0.001 ~ "***",
+#                               p < 0.01  ~ "**",
+#                               p < 0.05  ~ "*",
+#                               TRUE      ~ "ns"),
+#             y_pos = 95,
+#             .groups = "drop")
+# 
+# p1 <- ggplot(df[df$Visit_ID %in% c(1,2),],
+#              aes(x = factor(MRI_Scanner), y = Age, fill = factor(MRI_Scanner))) +
+#   geom_violin(alpha = 0.6) +
+#   geom_boxplot(width = 0.15, outlier.shape = NA, fill = "white") +
+#   # bracket line
+#   geom_segment(data = pvals,
+#                aes(x = 1, xend = 2, y = y_pos - 1, yend = y_pos - 1),
+#                inherit.aes = FALSE, linewidth = 0.5) +
+#   # left tick
+#   geom_segment(data = pvals,
+#                aes(x = 1, xend = 1, y = y_pos - 2, yend = y_pos - 1),
+#                inherit.aes = FALSE, linewidth = 0.5) +
+#   # right tick
+#   geom_segment(data = pvals,
+#                aes(x = 2, xend = 2, y = y_pos - 2, yend = y_pos - 1),
+#                inherit.aes = FALSE, linewidth = 0.5) +
+#   # stars
+#   geom_text(data = pvals,
+#             aes(x = 1.5, y = y_pos, label = label),
+#             size     = 8,
+#             fontface = "bold",
+#             colour   = "black",
+#             inherit.aes = FALSE) +
+#   facet_wrap(~ Visit_ID, labeller = label_both) +
+#   scale_fill_manual(values = c("#6D9EC1", "#E46726")) +
+#   labs(x = "Scanner", y = "Age", title = "Age distribution by scanner") +
+#   theme_minimal() +
+#   theme(legend.position = "none")
+# p1
+# 
+# p_age_eth <- ggplot(df[df$Visit_ID %in% c(1,2),],
+#              aes(x = factor(MRI_Scanner), y = Age, fill = factor(MRI_Scanner))) +
+#   geom_violin(alpha = 0.6) +
+#   geom_boxplot(width = 0.15, outlier.shape = NA, fill = "white") +
+#   # bracket line
+#   geom_segment(data = pvals,
+#                aes(x = 1, xend = 2, y = y_pos - 1, yend = y_pos - 1),
+#                inherit.aes = FALSE, linewidth = 0.5) +
+#   # left tick
+#   geom_segment(data = pvals,
+#                aes(x = 1, xend = 1, y = y_pos - 2, yend = y_pos - 1),
+#                inherit.aes = FALSE, linewidth = 0.5) +
+#   # right tick
+#   geom_segment(data = pvals,
+#                aes(x = 2, xend = 2, y = y_pos - 2, yend = y_pos - 1),
+#                inherit.aes = FALSE, linewidth = 0.5) +
+#   # stars
+#   geom_text(data = pvals,
+#             aes(x = 1.5, y = y_pos, label = label),
+#             size     = 8,
+#             fontface = "bold",
+#             colour   = "black",
+#             inherit.aes = FALSE) +
+#   facet_wrap(~ Visit_ID + Ethnicity, labeller = label_both) +
+#   scale_fill_manual(values = c("#6D9EC1", "#E46726")) +
+#   labs(x = "Scanner", y = "Age", title = "Age distribution by scanner") +
+#   theme_minimal() +
+#   theme(legend.position = "none")
+# p_age_eth
+# 
+# 
+# p_area <- df %>%
+#   filter(!is.na(mean_WhiteSurfArea_area)) %>%
+#   group_by(Visit_ID, MRI_Scanner) %>%
+#   summarise(mean_area = mean(mean_WhiteSurfArea_area, na.rm = TRUE),
+#             se_area   = sd(mean_WhiteSurfArea_area,   na.rm = TRUE) / sqrt(n()),
+#             .groups   = "drop") %>%
+#   ggplot(aes(x = Visit_ID, y = mean_area, colour = MRI_Scanner, group = MRI_Scanner)) +
+#   annotate("rect", xmin = 1.5, xmax = 2.5, ymin = -Inf, ymax = Inf,
+#            fill = "yellow", alpha = 0.2) +
+#   annotate("text", x = 2, y = Inf, label = "Scanner\nchange",
+#            vjust = 1.5, size = 3, colour = "darkgoldenrod") +
+#   geom_line(linewidth = 1.2) +
+#   geom_point(size = 3) +
+#   geom_errorbar(aes(ymin = mean_area - se_area,
+#                     ymax = mean_area + se_area), width = 0.1) +
+#   scale_colour_manual(values = c("#6D9EC1", "#E46726")) +
+#   labs(x      = "Visit",
+#        y      = "Mean surface area (mm²)",
+#        colour = "Scanner",
+#        title  = "Surface area by scanner per visit") +
+#   theme_minimal()
+# 
+# p_thk <- df %>%
+#   filter(!is.na(mean_MeanThickness_thickness)) %>%
+#   group_by(Visit_ID, MRI_Scanner) %>%
+#   summarise(mean_thk = mean(mean_MeanThickness_thickness, na.rm = TRUE),
+#             se_thk   = sd(mean_MeanThickness_thickness,   na.rm = TRUE) / sqrt(n()),
+#             .groups  = "drop") %>%
+#   ggplot(aes(x = Visit_ID, y = mean_thk, colour = MRI_Scanner, group = MRI_Scanner)) +
+#   annotate("rect", xmin = 1.5, xmax = 2.5, ymin = -Inf, ymax = Inf,
+#            fill = "yellow", alpha = 0.2) +
+#   annotate("text", x = 2, y = Inf, label = "Scanner\nchange",
+#            vjust = 1.5, size = 3, colour = "darkgoldenrod") +
+#   geom_line(linewidth = 1.2) +
+#   geom_point(size = 3) +
+#   geom_errorbar(aes(ymin = mean_thk - se_thk,
+#                     ymax = mean_thk + se_thk), width = 0.1) +
+#   scale_colour_manual(values = c("#6D9EC1", "#E46726")) +
+#   labs(x      = "Visit",
+#        y      = "Mean thickness (mm)",
+#        colour = "Scanner",
+#        title  = "Thickness by scanner per visit") +
+#   theme_minimal()
+# 
+# p_thk | p_area
+# 
+# 
+# df %>%
+#   filter(!is.na(mean_WhiteSurfArea_area)) %>%
+#   group_by(Visit_ID, MRI_Scanner, Ethnicity) %>%
+#   summarise(mean_area = mean(mean_WhiteSurfArea_area, na.rm = TRUE),
+#             se_area   = sd(mean_WhiteSurfArea_area,   na.rm = TRUE) / sqrt(n()),
+#             .groups   = "drop") %>%
+#   ggplot(aes(x = Visit_ID, y = mean_area,
+#              colour = MRI_Scanner, group = MRI_Scanner)) +
+#   annotate("rect", xmin = 1.5, xmax = 2.5, ymin = -Inf, ymax = Inf,
+#            fill = "yellow", alpha = 0.2) +
+#   geom_line(linewidth = 1.2) +
+#   geom_point(size = 3) +
+#   geom_errorbar(aes(ymin = mean_area - se_area,
+#                     ymax = mean_area + se_area), width = 0.1) +
+#   scale_colour_manual(values = c("#6D9EC1", "#E46726")) +
+#   facet_wrap(~ Ethnicity) +
+#   labs(x = "Visit", y = "Mean surface area (mm²)",
+#        colour = "Scanner",
+#        title  = "Surface area by scanner per visit, split by Ethnicity") +
+#   theme_minimal()
+# 
+# df %>%
+#   filter(!is.na(mean_MeanThickness_thickness)) %>%
+#   group_by(Visit_ID, MRI_Scanner, Ethnicity) %>%
+#   summarise(mean_area = mean(mean_MeanThickness_thickness, na.rm = TRUE),
+#             se_area   = sd(mean_MeanThickness_thickness,   na.rm = TRUE) / sqrt(n()),
+#             .groups   = "drop") %>%
+#   ggplot(aes(x = Visit_ID, y = mean_area,
+#              colour = MRI_Scanner, group = MRI_Scanner)) +
+#   annotate("rect", xmin = 1.5, xmax = 2.5, ymin = -Inf, ymax = Inf,
+#            fill = "yellow", alpha = 0.2) +
+#   geom_line(linewidth = 1.2) +
+#   geom_point(size = 3) +
+#   geom_errorbar(aes(ymin = mean_area - se_area,
+#                     ymax = mean_area + se_area), width = 0.1) +
+#   scale_colour_manual(values = c("#6D9EC1", "#E46726")) +
+#   facet_wrap(~ Ethnicity) +
+#   labs(x = "Visit", y = "Mean thickness (mm)",
+#        colour = "Scanner",
+#        title  = "Thickness area by scanner per visit, split by Ethnicity") +
+#   theme_minimal()
+
+```
+
+```{r}
+df_combat <- df[, c("Med_ID", "Visit_ID", "Age", "MRI_Scanner", "dAZ", "A0Z", "A0", "dA", "Ethnicity", "Gender","YoE", "CS", "eTIV", area_cols, thk_cols, vol_cols, area_cols_ROIs, thk_cols_ROIs, vol_cols_ROIs)]
+
+combat_area <- longCombat(
+  idvar     = "Med_ID",
+  batchvar  = "MRI_Scanner",
+  feature   =  area_cols,
+  formula   = 'A0Z*dAZ + Ethnicity + Gender + YoE + eTIV',
+  # formula   = 'A0Z*dAZ + Ethnicity + Gender + YoE',
+  ranef     = "(1|Med_ID)",
+  timevar   = "dAZ",
+  
+  data      = df_combat
+)
+
+combat_thk <- longCombat(
+  idvar     = "Med_ID",
+  batchvar  = "MRI_Scanner",
+  feature   = thk_cols,
+  formula   = 'A0Z*dAZ + Ethnicity + Gender + YoE + eTIV',
+  # formula   = 'A0Z*dAZ + Ethnicity + Gender + YoE',
+  ranef     = "(1|Med_ID)",
+  timevar   = "dAZ",
+  data      = df_combat
+)
+
+combat_vol <- longCombat(
+  idvar    = "Med_ID",
+  batchvar = "MRI_Scanner",
+  feature  = vol_cols,
+  formula  = 'A0Z*dAZ + Ethnicity + Gender + YoE + eTIV',
+  # formula  = 'A0Z*dAZ + Ethnicity + Gender + YoE',
+  ranef    = "(1|Med_ID)",
+  timevar  = "dAZ",
+  data     = df_combat
+)
+
+combat_area_ROIs <- longCombat(
+  idvar     = "Med_ID",
+  batchvar  = "MRI_Scanner",
+  feature   =  area_cols_ROIs,
+  formula   = 'A0Z*dAZ + Ethnicity + Gender + YoE + eTIV',
+  # formula   = 'A0Z*dAZ + Ethnicity + Gender + YoE',
+  ranef     = "(1|Med_ID)",
+  timevar   = "dAZ",
+  data      = df_combat
+)
+
+combat_thk_ROIs <- longCombat(
+  idvar     = "Med_ID",
+  batchvar  = "MRI_Scanner",
+  feature   = thk_cols_ROIs,
+  formula   = 'A0Z*dAZ + Ethnicity + Gender + YoE + eTIV',
+  # formula   = 'A0Z*dAZ + Ethnicity + Gender + YoE',
+  ranef     = "(1|Med_ID)",
+  timevar   = "dAZ",
+  data      = df_combat
+)
+
+combat_vol_ROIs <- longCombat(
+  idvar    = "Med_ID",
+  batchvar = "MRI_Scanner",
+  feature  = vol_cols_ROIs,
+  formula  = 'A0Z*dAZ + Ethnicity + Gender + YoE + eTIV',
+  # formula  = 'A0Z*dAZ + Ethnicity + Gender + YoE',
+  ranef    = "(1|Med_ID)",
+  timevar  = "dAZ",
+  data     = df_combat
+)
+
+# combat_global_pooled <- longCombat(
+#   idvar    = "Med_ID",
+#   batchvar = "MRI_Scanner",
+#   feature  = pooled_cols,
+#   # formula  = 'A0Z*dAZ + Ethnicity + Gender + YoE + eTIV',
+#   formula  = 'A0Z*dAZ + Ethnicity + Gender + YoE',
+#   ranef    = "(1|Med_ID)",
+#   timevar  = "dAZ",
+#   data     = df_combat
+# )
+
+# harm_area <- combat_area$data_combat %>% select(-MRI_Scanner)
+# harm_thk  <- combat_thk$data_combat  %>% select(-MRI_Scanner)
+# harm_vol  <- combat_vol$data_combat  %>% select(-MRI_Scanner)
+# harm_pooled  <- combat_global_pooled$data_combat  %>% select(-MRI_Scanner)
+
+harm_area_ROIs  <- combat_area_ROIs$data_combat  %>% select(-MRI_Scanner)
+harm_thk_ROIs  <- combat_thk_ROIs$data_combat  %>% select(-MRI_Scanner)
+harm_vol_ROIs  <- combat_vol_ROIs$data_combat  %>% select(-MRI_Scanner)
+
+harm_all  <- merge(harm_area_ROIs,  harm_thk_ROIs, by = c("Med_ID", "dAZ"))
+harm_all  <- merge(harm_all,  harm_vol_ROIs, by = c("Med_ID", "dAZ"))
+
+# harm_all  <- merge(harm_area, harm_thk, by = c("Med_ID", "dAZ"))
+# harm_all  <- merge(harm_all,  harm_vol, by = c("Med_ID", "dAZ"))
+
+# harm_all  <- merge(harm_all,  harm_area_ROIs, by = c("Med_ID", "dAZ"))
+# harm_all  <- merge(harm_all,  harm_thk_ROIs, by = c("Med_ID", "dAZ"))
+# harm_all  <- merge(harm_all,  harm_vol_ROIs, by = c("Med_ID", "dAZ"))
+# harm_all  <- merge(harm_all,  harm_pooled, by = c("Med_ID", "dAZ"))
+
+df <- merge(df_combat, harm_all, by = c("Med_ID", "dAZ"))
+
+# df$MeanThk.combat <- (df$rh_MeanThickness_thickness.combat + df$lh_MeanThickness_thickness.combat)/2
+# df$MeanSfA.combat <- df$rh_WhiteSurfArea_area.combat + df$lh_WhiteSurfArea_area.combat
+# df$MeanVolume.combat <- df$lhCortexVol.combat + df$rhCortexVol.combat
+
+# m <- lmer(MeanThk.combat ~ 1 + (1 | Med_ID), data = df)
+# vc <- as.data.frame(VarCorr(m))
+# subject_var <- vc$vcov[vc$grp == "Med_ID"]
+# resid_var   <- vc$vcov[vc$grp == "Residual"]
+# ICCThk.combat <- subject_var / (subject_var + resid_var)
+# ICCThk.combat
+# 
+# m <- lmer(mean_MeanThickness_thickness ~ 1 + (1 | Med_ID), data = df)
+# vc <- as.data.frame(VarCorr(m))
+# subject_var <- vc$vcov[vc$grp == "Med_ID"]
+# resid_var   <- vc$vcov[vc$grp == "Residual"]
+# ICCThk <- subject_var / (subject_var + resid_var)
+# ICCThk
+# 
+# m <- lmer(MeanSfA.combat ~ 1 + (1 | Med_ID), data = df)
+# vc <- as.data.frame(VarCorr(m))
+# subject_var <- vc$vcov[vc$grp == "Med_ID"]
+# resid_var   <- vc$vcov[vc$grp == "Residual"]
+# ICCSfA.combat <- subject_var / (subject_var + resid_var)
+# ICCSfA.combat
+# 
+# m <- lmer(mean_WhiteSurfArea_area ~ 1 + (1 | Med_ID), data = df)
+# vc <- as.data.frame(VarCorr(m))
+# subject_var <- vc$vcov[vc$grp == "Med_ID"]
+# resid_var   <- vc$vcov[vc$grp == "Residual"]
+# ICCSfA <- subject_var / (subject_var + resid_var)
+# ICCSfA
+```
+
+```{r}
+# cor.test(df$mean_MeanThickness_thickness, df$mean_MeanThickness_thickness_combat.roi)
+# cor.test(df$mean_MeanThickness_thickness, df$mean_MeanThickness_thickness.combat)
+# cor.test(df$mean_MeanThickness_thickness_combat.roi, df$mean_MeanThickness_thickness.combat)
+# 
+# cor.test(df$mean_WhiteSurfArea_area, df$mean_WhiteSurfArea_area_combat.roi)
+# cor.test(df$mean_WhiteSurfArea_area, df$mean_WhiteSurfArea_area.combat)
+# cor.test(df$mean_WhiteSurfArea_area_combat.roi, df$mean_WhiteSurfArea_area.combat)
+
+m_preThK = lmer(mean_MeanThickness_thickness ~ A0Z*dAZ*MRI_Scanner + Ethnicity + Gender + YoE + (1|Med_ID), data=df)
+summary(m_preThK)
+
+# m_postThK = lmer(df$MeanThk.combat ~ A0Z*dAZ*MRI_Scanner + Ethnicity + Gender + YoE + (1|Med_ID), data=df)
+# summary(m_postThK)
+
+m_postThK_pooled = lmer(df$mean_MeanThickness_thickness.combat ~ A0Z*dAZ*MRI_Scanner + Ethnicity + Gender + YoE + (1|Med_ID), data=df)
+summary(m_postThK_pooled)
+```
+
+```{r}
+df$mean_WhiteSurfArea_area = df$mean_WhiteSurfArea_area*34
+df$mean_WhiteSurfArea_area.combat = df$mean_WhiteSurfArea_area.combat*34
+
+m_preSA = lmer(mean_WhiteSurfArea_area ~ A0Z*dAZ*MRI_Scanner + Ethnicity + Gender + YoE  + eTIV + (1|Med_ID), data=df)
+summary(m_preSA)
+
+# m_postSA = lmer(MeanSfA.combat ~ A0Z*dAZ*MRI_Scanner + Ethnicity + Gender + YoE + (1|Med_ID), data=df)
+# summary(m_postSA)
+
+m_postSA_pooled = lmer(mean_WhiteSurfArea_area.combat ~ A0Z*dAZ*MRI_Scanner + Ethnicity + Gender + YoE + eTIV + (1|Med_ID), data=df)
+summary(m_postSA_pooled)
+
+# m_postSA_postcal = lmer(mean_WhiteSurfArea_area_combat_postcalc ~ A0Z*dAZ*CS*MRI_Scanner + Ethnicity + Gender + YoE + (1|Med_ID), data=df)
+# summary(m_postSA_postcal)
+# 
+# m_postSA_global = lmer(mean_WhiteSurfArea_area.combat ~ A0Z*dAZ*CS*MRI_Scanner + Ethnicity + Gender + YoE + (1|Med_ID), data=df)
+# summary(m_postSA_global)
+
+df$mean_Volume.combat = df$mean_Volume.combat*34
+  
+write.csv(df, "COMBAT_data/HABS_data_longCombatCorrectedROIGLOBTOGETHER.csv", row.names = FALSE)
+
+table(df$MRI_Scanner, df$CS)
+table(df$MRI_Scanner, df$Gender)
+table(df$MRI_Scanner, df$Ethnicity)
+```
+
+
+```{r}
+# p_area_eth <- df %>%
+#   filter(!is.na(MeanSfA.combat)) %>%
+#   group_by(Visit_ID, MRI_Scanner, Ethnicity) %>%
+#   summarise(mean_area = mean(MeanSfA.combat, na.rm = TRUE),
+#             se_area   = sd(MeanSfA.combat,   na.rm = TRUE) / sqrt(n()),
+#             .groups   = "drop") %>%
+#   ggplot(aes(x = Visit_ID, y = mean_area, 
+#              colour = MRI_Scanner, group = MRI_Scanner)) +
+#   annotate("rect", xmin = 1.5, xmax = 2.5, ymin = -Inf, ymax = Inf,
+#            fill = "yellow", alpha = 0.2) +
+#   geom_line(linewidth = 1.2) +
+#   geom_point(size = 3) +
+#   geom_errorbar(aes(ymin = mean_area - se_area,
+#                     ymax = mean_area + se_area), width = 0.1) +
+#   scale_colour_manual(values = c("#6D9EC1", "#E46726")) +
+#   facet_wrap(~ Ethnicity) +
+#   labs(x = "Visit", y = "Mean surface area COMBAT (mm²)",
+#        colour = "Scanner", title = "Surface area by scanner per visit") +
+#   theme_minimal()
+# 
+# p_thk_eth <- df %>%
+#   filter(!is.na(MeanThk.combat)) %>%
+#   group_by(Visit_ID, MRI_Scanner, Ethnicity) %>%
+#   summarise(mean_thk = mean(MeanThk.combat, na.rm = TRUE),
+#             se_thk   = sd(MeanThk.combat,   na.rm = TRUE) / sqrt(n()),
+#             .groups  = "drop") %>%
+#   ggplot(aes(x = Visit_ID, y = mean_thk,
+#              colour = MRI_Scanner, group = MRI_Scanner)) +
+#   annotate("rect", xmin = 1.5, xmax = 2.5, ymin = -Inf, ymax = Inf,
+#            fill = "yellow", alpha = 0.2) +
+#   geom_line(linewidth = 1.2) +
+#   geom_point(size = 3) +
+#   geom_errorbar(aes(ymin = mean_thk - se_thk,
+#                     ymax = mean_thk + se_thk), width = 0.1) +
+#   scale_colour_manual(values = c("#6D9EC1", "#E46726")) +
+#   facet_wrap(~ Ethnicity) +
+#   labs(x = "Visit", y = "Mean thickness COMBAT (mm)",
+#        colour = "Scanner", title = "Thickness by scanner per visit") +
+#   theme_minimal()
+# 
+# p_area_eth_pre
+# p_area_eth
+# 
+# p_thk_eth_pre
+# p_thk_eth
+# 
+# (p_area_eth_pre | p_thk_eth_pre)  /  (p_area_eth | p_thk_eth)+
+#   plot_annotation(
+#     title = "Scanner effects by ethnicity — post vs pre ComBat"
+#   ) +
+#   plot_layout(guides = "collect")
+
+```
+
+```{r}
+# p_area <- df %>%
+#   filter(!is.na(MeanSfA.combat)) %>%
+#   group_by(Visit_ID, MRI_Scanner) %>%
+#   summarise(mean_area = mean(MeanSfA.combat, na.rm = TRUE),
+#             se_area   = sd(MeanSfA.combat,   na.rm = TRUE) / sqrt(n()),
+#             .groups   = "drop") %>%
+#   ggplot(aes(x = Visit_ID, y = mean_area, 
+#              colour = MRI_Scanner, group = MRI_Scanner)) +
+#   annotate("rect", xmin = 1.5, xmax = 2.5, ymin = -Inf, ymax = Inf,
+#            fill = "yellow", alpha = 0.2) +
+#   geom_line(linewidth = 1.2) +
+#   geom_point(size = 3) +
+#   geom_errorbar(aes(ymin = mean_area - se_area,
+#                     ymax = mean_area + se_area), width = 0.1) +
+#   scale_colour_manual(values = c("#6D9EC1", "#E46726")) +
+#   labs(x = "Visit", y = "Mean surface area COMBAT (mm²)",
+#        colour = "Scanner", title = "Surface area by scanner per visit") +
+#   theme_minimal()
+# 
+# p_thk <- df %>%
+#   filter(!is.na(MeanThk.combat)) %>%
+#   group_by(Visit_ID, MRI_Scanner) %>%
+#   summarise(mean_thk = mean(MeanThk.combat, na.rm = TRUE),
+#             se_thk   = sd(MeanThk.combat,   na.rm = TRUE) / sqrt(n()),
+#             .groups  = "drop") %>%
+#   ggplot(aes(x = Visit_ID, y = mean_thk,
+#              colour = MRI_Scanner, group = MRI_Scanner)) +
+#   annotate("rect", xmin = 1.5, xmax = 2.5, ymin = -Inf, ymax = Inf,
+#            fill = "yellow", alpha = 0.2) +
+#   geom_line(linewidth = 1.2) +
+#   geom_point(size = 3) +
+#   geom_errorbar(aes(ymin = mean_thk - se_thk,
+#                     ymax = mean_thk + se_thk), width = 0.1) +
+#   scale_colour_manual(values = c("#6D9EC1", "#E46726")) +
+#   labs(x = "Visit", y = "Mean thickness COMBAT (mm)",
+#        colour = "Scanner", title = "Thickness by scanner per visit") +
+#   theme_minimal()
+# 
+# p_area_pre <- df %>%
+#   filter(!is.na(mean_WhiteSurfArea_area)) %>%
+#   group_by(Visit_ID, MRI_Scanner) %>%
+#   summarise(mean_area = mean(mean_WhiteSurfArea_area, na.rm = TRUE),
+#             se_area   = sd(mean_WhiteSurfArea_area,   na.rm = TRUE) / sqrt(n()),
+#             .groups   = "drop") %>%
+#   ggplot(aes(x = Visit_ID, y = mean_area,
+#              colour = MRI_Scanner, group = MRI_Scanner)) +
+#   annotate("rect", xmin = 1.5, xmax = 2.5, ymin = -Inf, ymax = Inf,
+#            fill = "yellow", alpha = 0.2) +
+#   geom_line(linewidth = 1.2) +
+#   geom_point(size = 3) +
+#   geom_errorbar(aes(ymin = mean_area - se_area,
+#                     ymax = mean_area + se_area), width = 0.1) +
+#   scale_colour_manual(values = c("#6D9EC1", "#E46726")) +
+#   labs(x = "Visit", y = "Mean surface area (mm²)",
+#        colour = "Scanner", title = "Surface area by scanner per visit") +
+#   theme_minimal()
+# 
+# p_thk_pre <- df %>%
+#   filter(!is.na(mean_MeanThickness_thickness)) %>%
+#   group_by(Visit_ID, MRI_Scanner) %>%
+#   summarise(mean_thk = mean(mean_MeanThickness_thickness, na.rm = TRUE),
+#             se_thk   = sd(mean_MeanThickness_thickness,   na.rm = TRUE) / sqrt(n()),
+#             .groups  = "drop") %>%
+#   ggplot(aes(x = Visit_ID, y = mean_thk,
+#              colour = MRI_Scanner, group = MRI_Scanner)) +
+#   annotate("rect", xmin = 1.5, xmax = 2.5, ymin = -Inf, ymax = Inf,
+#            fill = "yellow", alpha = 0.2) +
+#   geom_line(linewidth = 1.2) +
+#   geom_point(size = 3) +
+#   geom_errorbar(aes(ymin = mean_thk - se_thk,
+#                     ymax = mean_thk + se_thk), width = 0.1) +
+#   scale_colour_manual(values = c("#6D9EC1", "#E46726")) +
+#   labs(x = "Visit", y = "Mean thickness (mm)",
+#        colour = "Scanner", title = "Thickness by scanner per visit") +
+#   theme_minimal()
+# 
+# p_area_pre
+# p_thk_pre
+# p_area
+# p_thk
+# 
+# (p_area_pre | p_thk_pre) / (p_area | p_thk) +
+#   plot_annotation(
+#     title = "Scanner effects — pre vs post ComBat (collapsed across ethnicity)"
+#   ) +
+#   plot_layout(guides = "collect")
+# 
+# # Classify each subject by their scanner trajectory
+# scanner_traj <- df %>%
+#   arrange(Med_ID, Visit_ID) %>%
+#   group_by(Med_ID) %>%
+#   summarise(
+#     traj = paste(unique(MRI_Scanner[order(Visit_ID)]), collapse = "→"),
+#     .groups = "drop"
+#   ) %>%
+#   mutate(traj = case_when(
+#     traj == "Skyra"       ~ "Skyra only",
+#     traj == "Vida1"       ~ "Vida1 only",
+#     traj == "Skyra→Vida1" ~ "Skyra→Vida1 (switcher)",
+#     TRUE                  ~ "Other"
+#   ))
+# 
+# df <- df %>% left_join(scanner_traj, by = "Med_ID")
+# 
+# # Now replot with trajectory instead of scanner
+# p_area_traj_pre <- df %>%
+#   filter(!is.na(mean_WhiteSurfArea_area)) %>%
+#   group_by(Visit_ID, traj) %>%
+#   summarise(mean_area = mean(mean_WhiteSurfArea_area, na.rm = TRUE),
+#             se_area   = sd(mean_WhiteSurfArea_area,   na.rm = TRUE) / sqrt(n()),
+#             .groups   = "drop") %>%
+#   ggplot(aes(x = Visit_ID, y = mean_area,
+#              colour = traj, group = traj)) +
+#   annotate("rect", xmin = 1.5, xmax = 2.5, ymin = -Inf, ymax = Inf,
+#            fill = "yellow", alpha = 0.2) +
+#   geom_line(linewidth = 1.2) +
+#   geom_point(size = 3) +
+#   geom_errorbar(aes(ymin = mean_area - se_area,
+#                     ymax = mean_area + se_area), width = 0.1) +
+#   scale_colour_manual(values = c("#6D9EC1", "#E46726", "#2ca25f", "grey50")) +
+#   labs(x = "Visit", y = "Mean surface area (mm²)",
+#        colour = "Scanner trajectory",
+#        title  = "Surface area — pre ComBat") +
+#   theme_minimal()
+# 
+# p_thk_traj_pre <- df %>%
+#   filter(!is.na(mean_MeanThickness_thickness)) %>%
+#   group_by(Visit_ID, traj) %>%
+#   summarise(mean_thk = mean(mean_MeanThickness_thickness, na.rm = TRUE),
+#             se_thk   = sd(mean_MeanThickness_thickness,   na.rm = TRUE) / sqrt(n()),
+#             .groups  = "drop") %>%
+#   ggplot(aes(x = Visit_ID, y = mean_thk,
+#              colour = traj, group = traj)) +
+#   annotate("rect", xmin = 1.5, xmax = 2.5, ymin = -Inf, ymax = Inf,
+#            fill = "yellow", alpha = 0.2) +
+#   geom_line(linewidth = 1.2) +
+#   geom_point(size = 3) +
+#   geom_errorbar(aes(ymin = mean_thk - se_thk,
+#                     ymax = mean_thk + se_thk), width = 0.1) +
+#   scale_colour_manual(values = c("#6D9EC1", "#E46726", "#2ca25f", "grey50")) +
+#   labs(x = "Visit", y = "Mean thickness (mm)",
+#        colour = "Scanner trajectory",
+#        title  = "Thickness — pre ComBat") +
+#   theme_minimal()
+# 
+# p_area_traj_post <- df %>%
+#   filter(!is.na(MeanSfA.combat)) %>%
+#   group_by(Visit_ID, traj) %>%
+#   summarise(mean_area = mean(MeanSfA.combat, na.rm = TRUE),
+#             se_area   = sd(MeanSfA.combat,   na.rm = TRUE) / sqrt(n()),
+#             .groups   = "drop") %>%
+#   ggplot(aes(x = Visit_ID, y = mean_area,
+#              colour = traj, group = traj)) +
+#   annotate("rect", xmin = 1.5, xmax = 2.5, ymin = -Inf, ymax = Inf,
+#            fill = "yellow", alpha = 0.2) +
+#   geom_line(linewidth = 1.2) +
+#   geom_point(size = 3) +
+#   geom_errorbar(aes(ymin = mean_area - se_area,
+#                     ymax = mean_area + se_area), width = 0.1) +
+#   scale_colour_manual(values = c("#6D9EC1", "#E46726", "#2ca25f", "grey50")) +
+#   labs(x = "Visit", y = "Mean surface area COMBAT (mm²)",
+#        colour = "Scanner trajectory",
+#        title  = "Surface area — post ComBat") +
+#   theme_minimal()
+# 
+# p_thk_traj_post <- df %>%
+#   filter(!is.na(MeanThk.combat)) %>%
+#   group_by(Visit_ID, traj) %>%
+#   summarise(mean_thk = mean(MeanThk.combat, na.rm = TRUE),
+#             se_thk   = sd(MeanThk.combat,   na.rm = TRUE) / sqrt(n()),
+#             .groups  = "drop") %>%
+#   ggplot(aes(x = Visit_ID, y = mean_thk,
+#              colour = traj, group = traj)) +
+#   annotate("rect", xmin = 1.5, xmax = 2.5, ymin = -Inf, ymax = Inf,
+#            fill = "yellow", alpha = 0.2) +
+#   geom_line(linewidth = 1.2) +
+#   geom_point(size = 3) +
+#   geom_errorbar(aes(ymin = mean_thk - se_thk,
+#                     ymax = mean_thk + se_thk), width = 0.1) +
+#   scale_colour_manual(values = c("#6D9EC1", "#E46726", "#2ca25f", "grey50")) +
+#   labs(x = "Visit", y = "Mean thickness COMBAT (mm)",
+#        colour = "Scanner trajectory",
+#        title  = "Thickness — post ComBat") +
+#   theme_minimal()
+# 
+# p_area_traj_pre
+# p_area_traj_post
+# 
+# p_thk_traj_pre
+# p_thk_traj_post
+# 
+# (p_area_traj_pre | p_thk_traj_pre) /
+# (p_area_traj_post | p_thk_traj_post) +
+#   plot_annotation(
+#     title = "Scanner effects by trajectory — pre vs post ComBat"
+#   ) +
+#   plot_layout(guides = "collect")
+# ```
+# 
+# ```{r}
+# p_area_traj_pre <- df %>%
+#   filter(!is.na(mean_WhiteSurfArea_area)) %>%
+#   group_by(Visit_ID, traj, Ethnicity) %>%
+#   summarise(mean_area = mean(mean_WhiteSurfArea_area, na.rm = TRUE),
+#             se_area   = sd(mean_WhiteSurfArea_area,   na.rm = TRUE) / sqrt(n()),
+#             .groups   = "drop") %>%
+#   ggplot(aes(x = Visit_ID, y = mean_area,
+#              colour = traj, group = traj)) +
+#   annotate("rect", xmin = 1.5, xmax = 2.5, ymin = -Inf, ymax = Inf,
+#            fill = "yellow", alpha = 0.2) +
+#   geom_line(linewidth = 1.2) +
+#   geom_point(size = 3) +
+#   geom_errorbar(aes(ymin = mean_area - se_area,
+#                     ymax = mean_area + se_area), width = 0.1) +
+#   scale_colour_manual(values = c("#6D9EC1", "#E46726", "#2ca25f", "grey50")) +
+#   facet_wrap(~ Ethnicity) +
+#   labs(x = "Visit", y = "Mean surface area (mm²)",
+#        colour = "Scanner trajectory",
+#        title  = "Surface area — pre ComBat") +
+#   theme_minimal()
+# 
+# p_thk_traj_pre <- df %>%
+#   filter(!is.na(mean_MeanThickness_thickness)) %>%
+#   group_by(Visit_ID, traj, Ethnicity) %>%
+#   summarise(mean_thk = mean(mean_MeanThickness_thickness, na.rm = TRUE),
+#             se_thk   = sd(mean_MeanThickness_thickness,   na.rm = TRUE) / sqrt(n()),
+#             .groups  = "drop") %>%
+#   ggplot(aes(x = Visit_ID, y = mean_thk,
+#              colour = traj, group = traj)) +
+#   annotate("rect", xmin = 1.5, xmax = 2.5, ymin = -Inf, ymax = Inf,
+#            fill = "yellow", alpha = 0.2) +
+#   geom_line(linewidth = 1.2) +
+#   geom_point(size = 3) +
+#   geom_errorbar(aes(ymin = mean_thk - se_thk,
+#                     ymax = mean_thk + se_thk), width = 0.1) +
+#   scale_colour_manual(values = c("#6D9EC1", "#E46726", "#2ca25f", "grey50")) +
+#   facet_wrap(~ Ethnicity) +
+#   labs(x = "Visit", y = "Mean thickness (mm)",
+#        colour = "Scanner trajectory",
+#        title  = "Thickness — pre ComBat") +
+#   theme_minimal()
+# 
+# p_area_traj_post <- df %>%
+#   filter(!is.na(MeanSfA.combat)) %>%
+#   group_by(Visit_ID, traj, Ethnicity) %>%
+#   summarise(mean_area = mean(MeanSfA.combat, na.rm = TRUE),
+#             se_area   = sd(MeanSfA.combat,   na.rm = TRUE) / sqrt(n()),
+#             .groups   = "drop") %>%
+#   ggplot(aes(x = Visit_ID, y = mean_area,
+#              colour = traj, group = traj)) +
+#   annotate("rect", xmin = 1.5, xmax = 2.5, ymin = -Inf, ymax = Inf,
+#            fill = "yellow", alpha = 0.2) +
+#   geom_line(linewidth = 1.2) +
+#   geom_point(size = 3) +
+#   geom_errorbar(aes(ymin = mean_area - se_area,
+#                     ymax = mean_area + se_area), width = 0.1) +
+#   scale_colour_manual(values = c("#6D9EC1", "#E46726", "#2ca25f", "grey50")) +
+#   facet_wrap(~ Ethnicity) +
+#   labs(x = "Visit", y = "Mean surface area COMBAT (mm²)",
+#        colour = "Scanner trajectory",
+#        title  = "Surface area — post ComBat") +
+#   theme_minimal()
+# 
+# p_thk_traj_post <- df %>%
+#   filter(!is.na(MeanThk.combat)) %>%
+#   group_by(Visit_ID, traj, Ethnicity) %>%
+#   summarise(mean_thk = mean(MeanThk.combat, na.rm = TRUE),
+#             se_thk   = sd(MeanThk.combat,   na.rm = TRUE) / sqrt(n()),
+#             .groups  = "drop") %>%
+#   ggplot(aes(x = Visit_ID, y = mean_thk,
+#              colour = traj, group = traj)) +
+#   annotate("rect", xmin = 1.5, xmax = 2.5, ymin = -Inf, ymax = Inf,
+#            fill = "yellow", alpha = 0.2) +
+#   geom_line(linewidth = 1.2) +
+#   geom_point(size = 3) +
+#   geom_errorbar(aes(ymin = mean_thk - se_thk,
+#                     ymax = mean_thk + se_thk), width = 0.1) +
+#   scale_colour_manual(values = c("#6D9EC1", "#E46726", "#2ca25f", "grey50")) +
+#   facet_wrap(~ Ethnicity) +
+#   labs(x = "Visit", y = "Mean thickness COMBAT (mm)",
+#        colour = "Scanner trajectory",
+#        title  = "Thickness — post ComBat") +
+#   theme_minimal()
+# 
+# p_area_traj_pre
+# p_thk_traj_pre
+# p_area_traj_post
+# p_thk_traj_post
+# 
+# (p_area_traj_pre | p_thk_traj_pre) /
+# (p_area_traj_post | p_thk_traj_post) +
+#   plot_annotation(
+#     title = "Scanner effects by trajectory and ethnicity — pre vs post ComBat"
+#   ) +
+#   plot_layout(guides = "collect")
+```
+
+```{r}
+# batchBoxplot(idvar='Med_ID', 
+#              batchvar='MRI_Scanner.x', 
+#              feature='mean_MeanThickness_thickness', 
+#              formula='A0Z*dAZ*CS + Ethnicity + Gender + YoE',
+#              ranef='(1|Med_ID)',
+#              data=df,
+#              orderby='var',
+#              colors=c('hotpink', 'gold'))
+# 
+# batchBoxplot(idvar='Med_ID', 
+#              batchvar='MRI_Scanner.x', 
+#              feature='mean_MeanThickness_thickness.combat', 
+#              formula='A0Z*dAZ*CS + Ethnicity + Gender + YoE',
+#              ranef='(1|Med_ID)',
+#              data=df,
+#              orderby='var',
+#              colors=c('hotpink', 'gold'))
+# 
+# batchBoxplot(idvar='Med_ID', 
+#              batchvar='MRI_Scanner.x', 
+#              feature='mean_WhiteSurfArea_area', 
+#              formula='A0Z*dAZ*CS + Ethnicity + Gender + YoE',
+#              ranef='(1|Med_ID)',
+#              data=df,
+#              orderby='var',
+#              colors=c('hotpink', 'gold'))
+# 
+# batchBoxplot(idvar='Med_ID', 
+#              batchvar='MRI_Scanner.x', 
+#              feature='mean_WhiteSurfArea_area.combat', 
+#              formula='A0Z*dAZ*CS + Ethnicity + Gender + YoE',
+#              ranef='(1|Med_ID)',
+#              data=df,
+#              orderby='var',
+#              colors=c('hotpink', 'gold'))
+```
+
+
